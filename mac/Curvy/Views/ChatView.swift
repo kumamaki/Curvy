@@ -1,6 +1,7 @@
 import AppKit
 import SwiftData
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The room. Top is the window's `.toolbar` (title + status subtitle
 /// + sign-out); middle is the scrolling message list with bubbles
@@ -23,6 +24,9 @@ struct ChatView: View {
     @State private var scrollAnchor: PersistentIdentifier?
     @State private var isPinnedToBottom: Bool = true
     @State private var shakeTrigger: Int = 0
+    @State private var isDropTargeted: Bool = false
+
+    private let pipeline = ImagePipeline()
 
     var body: some View {
         messageList
@@ -33,9 +37,25 @@ struct ChatView: View {
                     replyingTo: $replyingTo,
                     shakeTrigger: shakeTrigger,
                     onSend: send,
-                    onPickError: { _ in shakeTrigger += 1 }
+                    onPickError: { _ in shakeTrigger += 1 },
+                    onLoadURL: preparePicked(url:),
+                    onLoadProviders: handleProviders(_:)
                 )
             }
+            .onDrop(of: [.image, .fileURL], isTargeted: $isDropTargeted) { providers in
+                handleProviders(providers)
+                return true
+            }
+            .overlay {
+                if isDropTargeted {
+                    dropZoneOverlay
+                }
+            }
+            .background(DisableTextFieldDrops())
+            .animation(
+                reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.18),
+                value: isDropTargeted
+            )
             .navigationTitle("Curvy")
             .navigationSubtitle(statusSubtitle)
             .toolbar {
@@ -48,6 +68,42 @@ struct ChatView: View {
                     .help("Sign out")
                 }
             }
+    }
+
+    /// Window-spanning drop affordance. Shown when the user is
+    /// dragging an image anywhere over the chat. The dashed inset
+    /// echoes Mail.app's "drop to attach" visual; the frosted backdrop
+    /// dims the message list so the user knows the drop is the
+    /// dominant interaction right now. `.allowsHitTesting(false)` is
+    /// critical — without it, the overlay's NSView would steal the
+    /// drop from the parent's `.onDrop`.
+    private var dropZoneOverlay: some View {
+        ZStack {
+            Rectangle()
+                .fill(.ultraThinMaterial)
+
+            VStack(spacing: 16) {
+                Image(systemName: "photo.badge.plus")
+                    .font(.system(size: 64, weight: .light))
+                    .foregroundStyle(.primary)
+
+                VStack(spacing: 4) {
+                    Text("Drop to attach")
+                        .font(.system(size: 22, weight: .semibold))
+                    Text("Encrypted before it leaves your Mac")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(.secondary, style: StrokeStyle(lineWidth: 2.5, dash: [10, 6]))
+                .padding(14)
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+        .transition(.opacity)
     }
 
     /// Title-bar subtitle that doubles as a connection indicator.
@@ -182,6 +238,108 @@ struct ChatView: View {
         guard message.kind == .text else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(message.body, forType: .string)
+    }
+
+    // MARK: - Image input handlers
+
+    /// Drag-drop and paste both deliver `[NSItemProvider]`. We pick
+    /// the first provider that yields either a file URL or an NSImage
+    /// and run it through the pipeline. Lives here (rather than in
+    /// `MessageComposer`) so the window-wide `.onDrop` and the
+    /// composer's `.onPasteCommand` / file importer all share a
+    /// single code path.
+    private func handleProviders(_ providers: [NSItemProvider]) {
+        guard let provider = providers.first else { return }
+
+        if provider.canLoadObject(ofClass: NSImage.self) {
+            provider.loadObject(ofClass: NSImage.self) { object, error in
+                if error != nil {
+                    DispatchQueue.main.async { shakeTrigger += 1 }
+                    return
+                }
+                guard let image = object as? NSImage else { return }
+                DispatchQueue.main.async { preparePicked(image: image) }
+            }
+            return
+        }
+
+        // Fallback: treat as a file URL. Drag-from-Finder lands here.
+        if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
+                if error != nil {
+                    DispatchQueue.main.async { shakeTrigger += 1 }
+                    return
+                }
+                let url: URL?
+                if let data = item as? Data {
+                    url = URL(dataRepresentation: data, relativeTo: nil)
+                } else if let direct = item as? URL {
+                    url = direct
+                } else {
+                    url = nil
+                }
+                guard let url else { return }
+                DispatchQueue.main.async { preparePicked(url: url) }
+            }
+        }
+    }
+
+    private func preparePicked(url: URL) {
+        do {
+            imageDraft = try pipeline.prepare(url: url)
+        } catch {
+            shakeTrigger += 1
+        }
+    }
+
+    private func preparePicked(image: NSImage) {
+        do {
+            imageDraft = try pipeline.prepare(image: image)
+        } catch {
+            shakeTrigger += 1
+        }
+    }
+}
+
+/// Reaches into the host window and calls `unregisterDraggedTypes()`
+/// on every `NSTextField` in the tree. This is the only way to keep
+/// the composer's text field from intercepting file drops as text:
+/// AppKit dispatches drags deepest-first to any view that's
+/// `registeredForDraggedTypes`, and `NSTextField` natively claims
+/// `.fileURL` / `.string`. Once unregistered, drag events bubble up
+/// to the SwiftUI `.onDrop` modifier on `ChatView`.
+///
+/// Idempotent — calling `unregisterDraggedTypes()` twice is a no-op.
+/// `updateNSView` re-walks on every render so a freshly-mounted
+/// composer (e.g. after window restore) gets disabled too.
+private struct DisableTextFieldDrops: NSViewRepresentable {
+    func makeNSView(context: Context) -> Hook { Hook() }
+
+    func updateNSView(_ nsView: Hook, context: Context) {
+        nsView.scheduleSweep()
+    }
+
+    final class Hook: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            scheduleSweep()
+        }
+
+        func scheduleSweep() {
+            DispatchQueue.main.async { [weak self] in self?.sweep() }
+        }
+
+        private func sweep() {
+            guard let root = window?.contentView else { return }
+            walk(root)
+        }
+
+        private func walk(_ view: NSView) {
+            if view is NSTextField {
+                view.unregisterDraggedTypes()
+            }
+            for sub in view.subviews { walk(sub) }
+        }
     }
 }
 

@@ -29,7 +29,7 @@ struct InviteView: View {
             VStack(spacing: 10) {
                 Text("Paste your invite")
                     .font(.headline)
-                Text("kumamaki sent you a base64 string over Signal. Drop it in.")
+                Text("your bro sent you a base64 string. Drop it in.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -47,10 +47,13 @@ struct InviteView: View {
                 Task { await session.applyInvite(paste) }
             } label: {
                 Text(isValidating ? "Checking with GitHub…" : "Unlock the room")
-                    .frame(minWidth: 220)
+                    .font(.system(size: 16, weight: .semibold))
+                    .frame(minWidth: 260)
+                    .padding(.vertical, 2)
             }
             .buttonStyle(.glassProminent)
-            .controlSize(.large)
+            .tint(Color.curvyInk)
+            .controlSize(.extraLarge)
             .disabled(paste.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isValidating)
 
             Spacer()

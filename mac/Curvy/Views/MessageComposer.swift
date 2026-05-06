@@ -23,10 +23,14 @@ import UniformTypeIdentifiers
 /// same `imageDraft` binding which the parent reads when `onSend`
 /// fires:
 ///   - paperclip button → `.fileImporter` (NSOpenPanel under the hood)
-///   - drag any image into the composer (file URL or in-memory)
+///   - drag any image anywhere in the window (handled by `ChatView`)
 ///   - ⌘V on the composer pastes an image off the clipboard, but only
 ///     when the clipboard *has* an image — text pastes still go to
 ///     the text field unmolested
+///
+/// File-picker URLs and pasted providers don't get prepared here —
+/// the composer hands them off to `ChatView` via `onLoadURL` /
+/// `onLoadProviders`, which owns the `ImagePipeline` and the drop UI.
 struct MessageComposer: View {
     @Binding var draftText: String
     @Binding var imageDraft: ImagePipeline.Prepared?
@@ -34,15 +38,14 @@ struct MessageComposer: View {
     let shakeTrigger: Int
     let onSend: () -> Void
     let onPickError: (any Error) -> Void
+    let onLoadURL: (URL) -> Void
+    let onLoadProviders: ([NSItemProvider]) -> Void
 
     @FocusState private var focused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var sendPulse: Bool = false
     @State private var didFocusOnce: Bool = false
     @State private var showFileImporter: Bool = false
-    @State private var isDropTargeted: Bool = false
-
-    private let pipeline = ImagePipeline()
 
     private var trimmed: String {
         draftText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -74,14 +77,6 @@ struct MessageComposer: View {
         }
         .background(.bar)
         .overlay(alignment: .top) { Divider() }
-        .overlay {
-            if isDropTargeted {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .strokeBorder(Color.accentColor, lineWidth: 2)
-                    .padding(2)
-                    .allowsHitTesting(false)
-            }
-        }
         .modifier(ShakeEffect(shakes: CGFloat(shakeTrigger)))
         .animation(
             reduceMotion ? .linear(duration: 0) : .spring(response: 0.34, dampingFraction: 0.82),
@@ -110,10 +105,6 @@ struct MessageComposer: View {
         ) { result in
             handleFileImporterResult(result)
         }
-        .onDrop(of: [.image], isTargeted: $isDropTargeted) { providers in
-            handleProviders(providers)
-            return true
-        }
         // .onPasteCommand only fires when the pasteboard contains one
         // of the listed UTTypes — text pastes don't trigger this, so
         // the text field still handles ⌘V for typed content. Note we
@@ -121,7 +112,7 @@ struct MessageComposer: View {
         // abstract UTType and some clipboard sources advertise only
         // a concrete subtype.
         .onPasteCommand(of: [.image, .png, .jpeg, .tiff, .heic]) { providers in
-            handleProviders(providers)
+            onLoadProviders(providers)
         }
     }
 
@@ -166,7 +157,7 @@ struct MessageComposer: View {
         Button {
             showFileImporter = true
         } label: {
-            Image(systemName: "photo.fill")
+            Image(systemName: "photo")
                 .font(.system(size: 18, weight: .medium))
                 .foregroundStyle(imageDraft == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tint))
                 .symbolRenderingMode(.hierarchical)
@@ -282,63 +273,8 @@ struct MessageComposer: View {
             // Sandbox: file importer URLs are pre-authorized for read.
             // No security-scoped resource bookkeeping needed because
             // we're synchronously reading them on the main thread.
-            preparePicked(url: url)
+            onLoadURL(url)
         case .failure(let error):
-            onPickError(error)
-        }
-    }
-
-    /// Drag-drop and paste both deliver `[NSItemProvider]`. We pick
-    /// the first provider that yields either a file URL or an NSImage
-    /// and run it through the pipeline.
-    private func handleProviders(_ providers: [NSItemProvider]) {
-        guard let provider = providers.first else { return }
-
-        if provider.canLoadObject(ofClass: NSImage.self) {
-            provider.loadObject(ofClass: NSImage.self) { object, error in
-                if let error {
-                    DispatchQueue.main.async { onPickError(error) }
-                    return
-                }
-                guard let image = object as? NSImage else { return }
-                DispatchQueue.main.async { preparePicked(image: image) }
-            }
-            return
-        }
-
-        // Fallback: treat as a file URL. Drag-from-Finder lands here.
-        if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
-            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
-                if let error {
-                    DispatchQueue.main.async { onPickError(error) }
-                    return
-                }
-                let url: URL?
-                if let data = item as? Data {
-                    url = URL(dataRepresentation: data, relativeTo: nil)
-                } else if let direct = item as? URL {
-                    url = direct
-                } else {
-                    url = nil
-                }
-                guard let url else { return }
-                DispatchQueue.main.async { preparePicked(url: url) }
-            }
-        }
-    }
-
-    private func preparePicked(url: URL) {
-        do {
-            imageDraft = try pipeline.prepare(url: url)
-        } catch {
-            onPickError(error)
-        }
-    }
-
-    private func preparePicked(image: NSImage) {
-        do {
-            imageDraft = try pipeline.prepare(image: image)
-        } catch {
             onPickError(error)
         }
     }
