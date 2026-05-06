@@ -18,6 +18,20 @@ import SwiftData
 /// comment we couldn't decrypt or decode. They stay in the cache
 /// rather than being dropped so the UI can render a "weird message
 /// detected" affordance, preserving the comment ID for context.
+///
+/// Image-specific fields (`assetPath`, `assetSha`, `imageMime`, …)
+/// are populated for `.image` and `.pendingImage` rows and nil
+/// otherwise. The decrypted image bytes themselves live in
+/// `~/Library/Caches/.../blobs/<basename of assetPath>`, not SwiftData
+/// — the local cache path is content-addressable from `assetPath`, so
+/// storing it would be redundant. `imageCachedAt` is bumped when the
+/// local file lands; flipping that field is what triggers the UI to
+/// re-render (SwiftData publishes the change, `@Query` re-fires).
+///
+/// Two image identifiers, on purpose: `assetPath` is what `getContent`
+/// addresses via the GitHub Contents API; `assetSha` is what the Git
+/// Blobs API GET takes (used for files >1 MB) and what Contents API
+/// DELETE requires in its request body during orphan-GC.
 @Model
 final class CachedMessage {
     @Attribute(.unique) var id: Int
@@ -29,16 +43,34 @@ final class CachedMessage {
     var createdAt: Date
     var updatedAt: Date
 
+    // Image-specific. All nil for text/weird/pending-text rows.
+    var assetPath: String?
+    var assetSha: String?
+    var imageMime: String?
+    var imageWidth: Int?
+    var imageHeight: Int?
+    var imageKeyB64: String?
+    var imageNonceB64: String?
+    var imageCachedAt: Date?
+
     enum Kind: String {
-        /// Real, server-confirmed message — has a real GitHub comment id.
+        /// Real, server-confirmed text message — has a real GitHub comment id.
         case text
         /// Couldn't decrypt or decode — render as "weird message detected".
         case weird
-        /// Optimistically-inserted local message awaiting network
+        /// Optimistically-inserted local text message awaiting network
         /// confirmation. Has a random negative id so it can't collide
         /// with real GitHub ids (which are always positive). Replaced
         /// with `.text` once `postComment` returns.
         case pending
+        /// Real, server-confirmed image message. The asset ciphertext
+        /// lives on `curvy-room`'s `blobs` release; the local cache
+        /// fills in asynchronously via `BlobFetcher`.
+        case image
+        /// Optimistic image send — sidecar bytes were stashed to the
+        /// cache dir under the negative id so the bubble can render
+        /// immediately without waiting on the upload round-trip.
+        case pendingImage
     }
 
     var kind: Kind {
@@ -53,7 +85,15 @@ final class CachedMessage {
          replyTo: String?,
          sentAt: Date,
          createdAt: Date,
-         updatedAt: Date) {
+         updatedAt: Date,
+         assetPath: String? = nil,
+         assetSha: String? = nil,
+         imageMime: String? = nil,
+         imageWidth: Int? = nil,
+         imageHeight: Int? = nil,
+         imageKeyB64: String? = nil,
+         imageNonceB64: String? = nil,
+         imageCachedAt: Date? = nil) {
         self.id = id
         self.kindRaw = kind.rawValue
         self.sender = sender
@@ -62,6 +102,14 @@ final class CachedMessage {
         self.sentAt = sentAt
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.assetPath = assetPath
+        self.assetSha = assetSha
+        self.imageMime = imageMime
+        self.imageWidth = imageWidth
+        self.imageHeight = imageHeight
+        self.imageKeyB64 = imageKeyB64
+        self.imageNonceB64 = imageNonceB64
+        self.imageCachedAt = imageCachedAt
     }
 }
 

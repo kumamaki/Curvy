@@ -286,6 +286,29 @@ Modules/SwiftUICore.swiftmodule/arm64e-apple-macos.swiftinterface
   primitive when the lightweight one fits.
 - **`xcodegen` regenerates `Info.plist` and `Curvy.entitlements`** on
   every run. Both are gitignored — `project.yml` is canonical.
+- **Fine-grained PAT permissions are per-API-resource, not per-feature.**
+  v1 minted PATs with `Issues: write` for the chat comments, which is
+  why text works. v3 needed `Contents: write` for image storage via
+  the Contents API — adding it surfaces as a 403 on `PUT /contents/...`
+  even though `/issues/.../comments` keeps working. Future feature
+  expansions (v2 reactions hit issues, v4 generic files hit contents,
+  but v5+ might need `Metadata: read` upgrades or new resources)
+  must check what resource each endpoint gates against and update
+  `scripts/mint-invite.sh`'s required-permissions header. PAT
+  permissions can be widened in place without rotating the token —
+  edit at github.com/settings/personal-access-tokens, save, done.
+- **The Contents API doesn't auto-create branches.** Originally I had
+  v3 store ciphertext on a separate `blobs` branch for "cleanliness",
+  with a one-time `ensureBlobsBranch` bootstrap. Two failure modes
+  killed it: (1) `PUT /contents/...?branch=blobs` returns 404
+  "Branch not found" if the branch doesn't exist, (2) the bootstrap
+  itself (`GET /git/ref/heads/main` to find a SHA to branch from)
+  returns 409 "Git Repository is empty" on a fresh repo with zero
+  commits. The fix was to drop the separate branch entirely and PUT
+  directly to the default branch — on an empty repo, the Contents
+  API creates the initial commit + the file in one operation. The
+  "main pollution" concern was always cosmetic; nobody opens
+  `curvy-room` in the GitHub web UI.
 
 ## What's deferred / not yet built
 

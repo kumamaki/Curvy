@@ -18,6 +18,7 @@ struct ChatView: View {
     @Query(sort: \CachedMessage.createdAt) private var messages: [CachedMessage]
 
     @State private var draftText: String = ""
+    @State private var imageDraft: ImagePipeline.Prepared?
     @State private var replyingTo: CachedMessage?
     @State private var scrollAnchor: PersistentIdentifier?
     @State private var isPinnedToBottom: Bool = true
@@ -28,9 +29,11 @@ struct ChatView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 MessageComposer(
                     draftText: $draftText,
+                    imageDraft: $imageDraft,
                     replyingTo: $replyingTo,
                     shakeTrigger: shakeTrigger,
-                    onSend: send
+                    onSend: send,
+                    onPickError: { _ in shakeTrigger += 1 }
                 )
             }
             .navigationTitle("Curvy")
@@ -133,20 +136,43 @@ struct ChatView: View {
 
     private func send() {
         let trimmed = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        let attachedImage = imageDraft
+
+        // Empty composer (no text, no attachment) is a silent no-op
+        // — the send button is always tappable per design, but
+        // pressing it with nothing to send shouldn't fire a network
+        // request.
+        guard !trimmed.isEmpty || attachedImage != nil else { return }
+
         let textToSend = draftText
         let replyID = replyingTo.map { String($0.id) }
+        let captionToSend = trimmed.isEmpty ? nil : draftText
+
+        // Snapshot then clear so the UI feels immediate. We restore
+        // the snapshot on failure below.
         draftText = ""
+        imageDraft = nil
         replyingTo = nil
+
         Task {
             do {
-                try await store.send(text: textToSend, replyTo: replyID)
+                if let attachedImage {
+                    try await store.sendImage(
+                        prepared: attachedImage,
+                        caption: captionToSend,
+                        replyTo: replyID
+                    )
+                } else {
+                    try await store.send(text: textToSend, replyTo: replyID)
+                }
             } catch {
-                // Restore the draft so the user doesn't lose their
-                // typing, and shake the composer so the failure is
-                // tactilely obvious. The store's `status` reflects the
-                // underlying error in the toolbar Live/Offline label.
+                // Restore drafts so the user doesn't lose their
+                // typing or attachment, and shake the composer so the
+                // failure is tactilely obvious. The store's `status`
+                // reflects the underlying error in the toolbar
+                // Live/Offline label.
                 draftText = textToSend
+                imageDraft = attachedImage
                 shakeTrigger += 1
             }
         }

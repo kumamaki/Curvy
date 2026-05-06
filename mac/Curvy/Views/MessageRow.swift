@@ -27,6 +27,7 @@ struct MessageRow: View {
     @State private var crossedThreshold: Bool = false
     @State private var bubblePulse: CGFloat = 1
     @State private var isHovered: Bool = false
+    @State private var isHoveringReply: Bool = false
 
     private let revealThreshold: CGFloat = 56
     private let maxDrag: CGFloat = 120
@@ -44,12 +45,13 @@ struct MessageRow: View {
                 if isMine {
                     Spacer(minLength: 60)
                     timestampText.opacity(isHovered ? 1 : 0)
+                    replyButton
                 }
 
                 ZStack(alignment: .leading) {
                     replyHintIcon
                     bubbleColumn
-                        .opacity(message.kind == .pending ? 0.65 : 1.0)
+                        .opacity(isOptimistic ? 0.65 : 1.0)
                         .scaleEffect(bubblePulse, anchor: isMine ? .trailing : .leading)
                         .offset(x: dragOffset)
                         .gesture(dragGesture)
@@ -57,6 +59,7 @@ struct MessageRow: View {
                 }
 
                 if !isMine {
+                    replyButton
                     timestampText.opacity(isHovered ? 1 : 0)
                     Spacer(minLength: 60)
                 }
@@ -102,6 +105,30 @@ struct MessageRow: View {
             .accessibilityLabel("Sent at \(message.sentAt.formatted(date: .omitted, time: .shortened))")
     }
 
+    private var replyButton: some View {
+        Button {
+            onReply(message)
+        } label: {
+            Image(systemName: "arrowshape.turn.up.left.fill")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(isHoveringReply ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                .frame(width: 22, height: 22)
+                .background(.fill.quaternary, in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .opacity(isHovered ? 1 : 0)
+        .offset(x: isHovered ? 0 : (isMine ? 6 : -6))
+        .scaleEffect(isHoveringReply ? 1.08 : 1.0, anchor: .center)
+        .animation(reduceMotion ? .linear(duration: 0) : .easeOut(duration: 0.12), value: isHoveringReply)
+        .onHover { hovering in
+            isHoveringReply = hovering
+        }
+        .help("Reply")
+        .accessibilityLabel("Reply")
+        .allowsHitTesting(isHovered)
+    }
+
     private var replyHintIcon: some View {
         Image(systemName: "arrowshape.turn.up.left.fill")
             .font(.title3)
@@ -111,6 +138,18 @@ struct MessageRow: View {
             .opacity(min(Double(dragOffset / 50), 1))
             .scaleEffect(0.5 + min(Double(dragOffset / revealThreshold), 1) * 0.5)
             .offset(x: -36)
+    }
+
+    /// Whether this message is in its "not yet committed" optimistic
+    /// state — pending text or pending image. Drives the 0.65 opacity
+    /// affordance that solidifies to 1.0 on commit.
+    private var isOptimistic: Bool {
+        message.kind == .pending || message.kind == .pendingImage
+    }
+
+    /// Whether this row carries an image (confirmed or pending).
+    private var isImage: Bool {
+        message.kind == .image || message.kind == .pendingImage
     }
 
     private var bubbleColumn: some View {
@@ -127,16 +166,124 @@ struct MessageRow: View {
                 replyPreview(target)
             }
 
-            Text(message.body)
-                .font(.system(size: 13))
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 11)
-                .padding(.vertical, 7)
-                .background { bubbleBackground }
-                .foregroundStyle(isMine ? Color.white : Color.primary)
-                .frame(maxWidth: 460, alignment: isMine ? .trailing : .leading)
+            if isImage {
+                imageBubble
+            } else {
+                Text(message.body)
+                    .font(.system(size: 13))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 7)
+                    .background { bubbleBackground }
+                    .foregroundStyle(isMine ? Color.white : Color.primary)
+                    .frame(maxWidth: 460, alignment: isMine ? .trailing : .leading)
+            }
         }
+    }
+
+    /// Image-rendering branch. The image is the bubble: same asymmetric
+    /// corner radius as text bubbles (clipShape), no fill behind it
+    /// (the image fills the slot). Caption rides under the image as a
+    /// separate text bubble, so reply parents and captions still get
+    /// the bubble treatment for legibility while the image stays
+    /// edge-to-edge inside its own clipped frame.
+    ///
+    /// Layout slot is reserved using `imageWidth/Height` from the
+    /// envelope so the bubble doesn't visually jump when the local
+    /// cache fills in async — the placeholder ProgressView and the
+    /// final image both occupy the same computed frame.
+    @ViewBuilder
+    private var imageBubble: some View {
+        VStack(alignment: isMine ? .trailing : .leading, spacing: 4) {
+            ZStack {
+                if let nsImage = loadedImage {
+                    Image(nsImage: nsImage)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    Rectangle()
+                        .fill(.fill.quaternary)
+                        .overlay {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                }
+            }
+            .frame(width: imageDisplaySize.width, height: imageDisplaySize.height)
+            .clipShape(bubbleShape)
+            .background(bubbleShape.fill(.fill.quaternary))
+
+            if !message.body.isEmpty {
+                Text(message.body)
+                    .font(.system(size: 13))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 7)
+                    .background { bubbleBackground }
+                    .foregroundStyle(isMine ? Color.white : Color.primary)
+                    .frame(maxWidth: imageDisplaySize.width, alignment: isMine ? .trailing : .leading)
+            }
+        }
+    }
+
+    /// Best available local image: real file from the cache for
+    /// `.image`, the pending sidecar for `.pendingImage`. Returns nil
+    /// when nothing's on disk — caller renders the placeholder.
+    private var loadedImage: NSImage? {
+        guard let assetPath = message.assetPath else {
+            // Pending row before its sidecar landed — fall through to placeholder.
+            return pendingSidecarImage
+        }
+        let url = BlobFetcher.cacheURL(for: assetPath)
+        if FileManager.default.fileExists(atPath: url.path) {
+            return NSImage(contentsOfFile: url.path)
+        }
+        return pendingSidecarImage
+    }
+
+    /// During an optimistic image send, the JPEG bytes get stashed at
+    /// `pending-<id>.jpg` in the cache dir under the negative pending
+    /// id. Until `commitPendingImage` re-links it, that's where the
+    /// preview lives.
+    private var pendingSidecarImage: NSImage? {
+        guard message.kind == .pendingImage else { return nil }
+        let pendingFilename = "pending-\(abs(message.id)).jpg"
+        let url = BlobFetcher.cacheDirectory.appending(path: pendingFilename, directoryHint: .notDirectory)
+        return NSImage(contentsOfFile: url.path)
+    }
+
+    /// Bubble-sized image display size, capped at 360pt on the longer
+    /// side (chat bubble feel) and never wider than the message
+    /// column's 460pt cap. Falls back to a square 200pt placeholder
+    /// when dimensions aren't yet known.
+    private var imageDisplaySize: CGSize {
+        let maxLong: CGFloat = 360
+        let widthCap: CGFloat = 460
+        guard let w = message.imageWidth, let h = message.imageHeight, w > 0, h > 0 else {
+            return CGSize(width: 200, height: 200)
+        }
+        let wF = CGFloat(w)
+        let hF = CGFloat(h)
+        let longest = max(wF, hF)
+        let scale = min(1, maxLong / longest)
+        let scaledW = min(wF * scale, widthCap)
+        let scaledH = hF * (scaledW / wF)
+        return CGSize(width: scaledW, height: scaledH)
+    }
+
+    /// Reusable shape for `clipShape` + a fill of the same shape behind
+    /// the image. Same asymmetric corner as `bubbleBackground`, just
+    /// extracted as a Shape so `clipShape` can take it.
+    private var bubbleShape: UnevenRoundedRectangle {
+        UnevenRoundedRectangle(
+            topLeadingRadius: bubbleCorner,
+            bottomLeadingRadius: isMine ? bubbleCorner : bubbleTailCorner,
+            bottomTrailingRadius: isMine ? bubbleTailCorner : bubbleCorner,
+            topTrailingRadius: bubbleCorner,
+            style: .continuous
+        )
     }
 
     /// Asymmetric rounded rect: full radius on three corners, tiny
