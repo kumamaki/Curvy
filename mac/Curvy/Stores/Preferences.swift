@@ -21,12 +21,28 @@ import Observation
 @Observable
 final class Preferences {
     private static let displayNameKey = "DisplayName"
+    private static let lastReadCreatedAtKey = "LastReadCreatedAt"
 
     @ObservationIgnored private let defaults: UserDefaults
 
     var displayName: String {
         didSet {
             defaults.set(displayName, forKey: Self.displayNameKey)
+        }
+    }
+
+    /// High-water mark of `createdAt` for messages the user has seen.
+    /// Anything strictly newer is "unread" for badge + notification
+    /// purposes. `nil` on first launch — `MessageStore.start` sets it
+    /// to the latest cached message at that point so historical
+    /// content doesn't trigger a wave of notifications.
+    var lastReadCreatedAt: Date? {
+        didSet {
+            if let lastReadCreatedAt {
+                defaults.set(lastReadCreatedAt, forKey: Self.lastReadCreatedAtKey)
+            } else {
+                defaults.removeObject(forKey: Self.lastReadCreatedAtKey)
+            }
         }
     }
 
@@ -37,6 +53,7 @@ final class Preferences {
         } else {
             self.displayName = NSFullUserName()
         }
+        self.lastReadCreatedAt = defaults.object(forKey: Self.lastReadCreatedAtKey) as? Date
     }
 }
 

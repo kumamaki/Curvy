@@ -16,6 +16,7 @@ struct ChatView: View {
     @Environment(SessionStore.self) private var session
     @Environment(MessageStore.self) private var store
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     @Query(sort: \CachedMessage.createdAt) private var messages: [CachedMessage]
 
     @State private var draftText: String = ""
@@ -25,6 +26,13 @@ struct ChatView: View {
     @State private var isPinnedToBottom: Bool = true
     @State private var shakeTrigger: Int = 0
     @State private var isDropTargeted: Bool = false
+
+    /// Shared namespace for the reaction "stick" animation. Picker
+    /// emojis publish a matched-geometry source keyed by
+    /// `(targetID, emoji)`; the badge that lands on the bubble corner
+    /// publishes the matching destination. SwiftUI animates the emoji
+    /// between them — same motion iMessage uses on tapback landing.
+    @Namespace private var reactionNamespace
 
     private let pipeline = ImagePipeline()
 
@@ -66,6 +74,28 @@ struct ChatView: View {
                         Image(systemName: "rectangle.portrait.and.arrow.right")
                     }
                     .help("Sign out")
+                }
+            }
+            // The initial mark-read + auth prompt fire once when the
+            // chat first becomes visible. `.task` is one-shot per view
+            // identity, which is exactly what we want — re-onboarding
+            // remounts ChatView so both re-run (markRead is cheap;
+            // auth is a no-op once the user has answered).
+            //
+            // markRead first so the dock badge clears immediately on
+            // app open regardless of how long the user takes to
+            // dismiss the auth dialog.
+            .task {
+                store.markRead()
+                _ = await Notifier.live.requestAuthorization()
+            }
+            // Window regaining focus is the canonical "user is reading
+            // again" signal. Bumps the watermark, clears the badge,
+            // dismisses any banners still sitting in Notification
+            // Center.
+            .onChange(of: scenePhase) { _, new in
+                if new == .active {
+                    store.markRead()
                 }
             }
     }
@@ -117,25 +147,118 @@ struct ChatView: View {
         return Text("Live").foregroundStyle(.green)
     }
 
-    /// Pre-compute one row spec per message before the `ForEach` runs.
-    /// Keying by `persistentModelID` (rather than the GitHub `id`)
-    /// keeps view identity stable when `MessageStore.send` updates a
-    /// pending row's `id` in place — no view re-creation, no flicker.
+    /// Pre-compute one row spec per non-reaction message before the
+    /// `ForEach` runs. Reaction rows get folded out of the bubble list
+    /// here and reattached as a `MessageReactions` aggregate on the
+    /// row their `reactionTargetID` points at.
+    ///
+    /// Keying RowItem by `persistentModelID` (rather than the GitHub
+    /// `id`) keeps view identity stable when `MessageStore.send`
+    /// updates a pending row's `id` in place — no view re-creation,
+    /// no flicker.
     private var rows: [RowItem] {
-        let byID = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0) })
+        let myName = store.displayName
+
+        var bubbleMessages: [CachedMessage] = []
+        var reactionRows: [CachedMessage] = []
+        for msg in messages {
+            switch msg.kind {
+            case .reaction, .reactionRemove:
+                reactionRows.append(msg)
+            default:
+                bubbleMessages.append(msg)
+            }
+        }
+
+        let aggregated = aggregateReactions(rows: reactionRows)
+        let byID = Dictionary(uniqueKeysWithValues: bubbleMessages.map { ($0.id, $0) })
+
         var prev: CachedMessage?
-        return messages.map { msg in
+        return bubbleMessages.map { msg in
             defer { prev = msg }
             let isNewGroup = prev?.sender != msg.sender || prev?.kind != msg.kind
             let replyParent = msg.replyTo
                 .flatMap { Int($0) }
                 .flatMap { byID[$0] }
+            let targetKey = String(msg.id)
             return RowItem(
                 message: msg,
-                isMine: msg.kind != .weird && msg.sender == store.displayName,
+                isMine: msg.kind != .weird && msg.sender == myName,
                 isNewGroup: isNewGroup,
-                replyTarget: replyParent
+                replyTarget: replyParent,
+                reactions: aggregated[targetKey] ?? .empty(targetID: targetKey)
             )
+        }
+    }
+
+    /// Fold raw `.reaction` / `.reactionRemove` rows into per-target
+    /// `MessageReactions` aggregates. A reaction is "live" iff no
+    /// matching `.reactionRemove` (same sender + same emoji + same
+    /// target) carries a strictly-newer `sentAt`. Per (sender, emoji),
+    /// only the most recent live reaction counts — a sender who
+    /// reacted, removed, then re-reacted shows up once.
+    private func aggregateReactions(rows: [CachedMessage]) -> [String: MessageReactions] {
+        var reactionsByTarget: [String: [CachedMessage]] = [:]
+        var removesByTarget: [String: [CachedMessage]] = [:]
+        for r in rows {
+            guard let tid = r.reactionTargetID else { continue }
+            if r.kind == .reaction {
+                reactionsByTarget[tid, default: []].append(r)
+            } else {
+                removesByTarget[tid, default: []].append(r)
+            }
+        }
+
+        var aggregated: [String: MessageReactions] = [:]
+        for (tid, reactions) in reactionsByTarget {
+            let removes = removesByTarget[tid] ?? []
+            // (sender|emoji) -> latest live reaction
+            var liveBySig: [String: CachedMessage] = [:]
+            for r in reactions {
+                let killed = removes.contains { rm in
+                    rm.sender == r.sender && rm.body == r.body && rm.sentAt > r.sentAt
+                }
+                if killed { continue }
+                let sig = "\(r.sender)|\(r.body)"
+                if let existing = liveBySig[sig], existing.sentAt > r.sentAt { continue }
+                liveBySig[sig] = r
+            }
+
+            var byEmoji: [String: [CachedMessage]] = [:]
+            for r in liveBySig.values {
+                byEmoji[r.body, default: []].append(r)
+            }
+
+            let groups = byEmoji.map { (emoji, members) -> ReactionGroup in
+                let sorted = members.sorted { $0.sentAt < $1.sentAt }
+                return ReactionGroup(
+                    emoji: emoji,
+                    senders: sorted.map(\.sender),
+                    earliestSentAt: sorted.first?.sentAt ?? .distantPast
+                )
+            }
+            .sorted { $0.earliestSentAt < $1.earliestSentAt }
+
+            aggregated[tid] = MessageReactions(targetID: tid, groups: groups)
+        }
+        return aggregated
+    }
+
+    /// Resolve a tapback action: send if `alreadyMine` is false, remove
+    /// if true. Errors shake the composer rather than throwing —
+    /// reactions are background-noise interactions, not first-class
+    /// sends, so we don't want to disrupt drafts on a failed react.
+    private func toggleReaction(targetID: String, emoji: String, alreadyMine: Bool) {
+        Task {
+            do {
+                if alreadyMine {
+                    try await store.removeReaction(targetID: targetID, emoji: emoji)
+                } else {
+                    try await store.sendReaction(targetID: targetID, emoji: emoji)
+                }
+            } catch {
+                shakeTrigger += 1
+            }
         }
     }
 
@@ -148,8 +271,18 @@ struct ChatView: View {
                         isMine: row.isMine,
                         showSenderLabel: row.isNewGroup,
                         replyTarget: row.replyTarget,
+                        reactions: row.reactions,
+                        mySender: store.displayName,
+                        reactionNamespace: reactionNamespace,
                         onReply: { replyingTo = $0 },
-                        onCopy: { copy(row.message) }
+                        onCopy: { copy(row.message) },
+                        onToggleReaction: { emoji, alreadyMine in
+                            toggleReaction(
+                                targetID: String(row.message.id),
+                                emoji: emoji,
+                                alreadyMine: alreadyMine
+                            )
+                        }
                     )
                     .padding(.top, row.isNewGroup ? 12 : 2)
                     .animation(
@@ -352,6 +485,7 @@ private struct RowItem: Identifiable {
     let isMine: Bool
     let isNewGroup: Bool
     let replyTarget: CachedMessage?
+    let reactions: MessageReactions
     var id: PersistentIdentifier { message.persistentModelID }
 }
 

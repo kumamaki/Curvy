@@ -53,6 +53,12 @@ final class CachedMessage {
     var imageNonceB64: String?
     var imageCachedAt: Date?
 
+    /// Reaction-specific. Stringified GitHub comment ID of the message
+    /// this reaction (or revocation) targets. Nil for every other
+    /// kind. The reaction's emoji rides in `body`, the reactor's name
+    /// in `sender` — same shape as text/image reuse the same columns.
+    var reactionTargetID: String?
+
     enum Kind: String {
         /// Real, server-confirmed text message — has a real GitHub comment id.
         case text
@@ -71,6 +77,13 @@ final class CachedMessage {
         /// cache dir under the negative id so the bubble can render
         /// immediately without waiting on the upload round-trip.
         case pendingImage
+        /// Reaction (an emoji applied to a target message). Filtered
+        /// out of the bubble list at render time and grouped under
+        /// the target by `ChatView.rows`.
+        case reaction
+        /// Revocation of a previously-sent reaction. Wins over a
+        /// matching `.reaction` row when its `sentAt` is newer.
+        case reactionRemove
     }
 
     var kind: Kind {
@@ -93,7 +106,8 @@ final class CachedMessage {
          imageHeight: Int? = nil,
          imageKeyB64: String? = nil,
          imageNonceB64: String? = nil,
-         imageCachedAt: Date? = nil) {
+         imageCachedAt: Date? = nil,
+         reactionTargetID: String? = nil) {
         self.id = id
         self.kindRaw = kind.rawValue
         self.sender = sender
@@ -110,6 +124,7 @@ final class CachedMessage {
         self.imageKeyB64 = imageKeyB64
         self.imageNonceB64 = imageNonceB64
         self.imageCachedAt = imageCachedAt
+        self.reactionTargetID = reactionTargetID
     }
 }
 

@@ -35,6 +35,12 @@ final class MessageStore {
 
     private(set) var status: Status = .idle
 
+    /// Number of cached, well-formed messages from someone other than
+    /// the current user with `createdAt` strictly newer than the
+    /// stored read watermark. Drives the dock badge label and is
+    /// available to any view that wants to render an unread count.
+    private(set) var unreadCount: Int = 0
+
     /// Read-only snapshot of the active display name. Used by the chat
     /// UI to compute `isMine` for bubble alignment. Reads through to
     /// `Preferences` without triggering observation — v1 has no UI to
@@ -46,6 +52,7 @@ final class MessageStore {
     @ObservationIgnored private let crypto: RoomCrypto
     @ObservationIgnored private let preferences: Preferences
     @ObservationIgnored private let blobFetcher: BlobFetcher
+    @ObservationIgnored private let notifier: Notifier
     @ObservationIgnored private let isFocused: @MainActor () -> Bool
     @ObservationIgnored private let logger = Logger(subsystem: "dev.kumamaki.Curvy", category: "MessageStore")
 
@@ -59,12 +66,14 @@ final class MessageStore {
          crypto: RoomCrypto = RoomCrypto(),
          preferences: Preferences = Preferences(),
          blobFetcher: BlobFetcher? = nil,
+         notifier: Notifier = .live,
          isFocused: @escaping @MainActor () -> Bool = { NSApplication.shared.isActive }) {
         self.modelContext = modelContext
         self.github = github
         self.crypto = crypto
         self.preferences = preferences
         self.blobFetcher = blobFetcher ?? BlobFetcher(github: github, modelContext: modelContext)
+        self.notifier = notifier
         self.isFocused = isFocused
     }
 
@@ -86,6 +95,19 @@ final class MessageStore {
         roomKey = key
         consecutiveErrors = 0
         pollTask?.cancel()
+
+        // First-ever launch: baseline the read watermark so historical
+        // content already in the room (or about to land via initial
+        // sync) doesn't trigger a wave of notifications. We pick the
+        // newest `createdAt` already in the cache, falling back to
+        // `now` if the cache is empty — server timestamps for any
+        // existing room content will be older than `now`, so initial
+        // sync stays silent.
+        if preferences.lastReadCreatedAt == nil {
+            preferences.lastReadCreatedAt = latestCreatedAt() ?? Date()
+        }
+        refreshUnread()
+
         if beginPolling {
             pollTask = Task { [weak self] in
                 await self?.runPollLoop()
@@ -102,6 +124,52 @@ final class MessageStore {
         roomKey = nil
         consecutiveErrors = 0
         status = .idle
+        unreadCount = 0
+        notifier.setBadge(nil)
+        notifier.clearDelivered()
+    }
+
+    // MARK: - Read state
+
+    /// Mark every cached message as read: bump the watermark to the
+    /// newest `createdAt`, drop any banners still sitting in
+    /// Notification Center, and clear the dock badge. Called by
+    /// `ChatView` when the window becomes the user's focus.
+    func markRead() {
+        if let latest = latestCreatedAt() {
+            preferences.lastReadCreatedAt = latest
+        }
+        notifier.clearDelivered()
+        refreshUnread()
+    }
+
+    private func refreshUnread() {
+        let watermark = preferences.lastReadCreatedAt
+        let me = preferences.displayName
+        let descriptor = FetchDescriptor<CachedMessage>()
+        let all = (try? modelContext.fetch(descriptor)) ?? []
+        let count = all.reduce(into: 0) { sum, msg in
+            guard msg.kind == .text || msg.kind == .image else { return }
+            guard msg.sender != me else { return }
+            if let watermark, msg.createdAt <= watermark { return }
+            sum += 1
+        }
+        unreadCount = count
+        notifier.setBadge(badgeLabel(for: count))
+    }
+
+    private func badgeLabel(for count: Int) -> String? {
+        if count <= 0 { return nil }
+        if count > 99 { return "99+" }
+        return String(count)
+    }
+
+    private func latestCreatedAt() -> Date? {
+        var descriptor = FetchDescriptor<CachedMessage>(
+            sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
+        )
+        descriptor.fetchLimit = 1
+        return (try? modelContext.fetch(descriptor))?.first?.createdAt
     }
 
     // MARK: - Send (text)
@@ -429,15 +497,73 @@ final class MessageStore {
             let envelope = try MessageEnvelope.decode(comment.body)
             let payload = try crypto.open(envelope, with: key)
             switch payload {
-            case .text:
+            case .text(let text):
                 upsertText(comment: comment, payload: payload)
+                announceIfNeeded(
+                    commentID: comment.id,
+                    createdAt: comment.createdAt,
+                    sender: text.sender,
+                    preview: text.body
+                )
             case .image(let image):
                 upsertImage(comment: comment, image: image, invite: invite, key: key)
+                announceIfNeeded(
+                    commentID: comment.id,
+                    createdAt: comment.createdAt,
+                    sender: image.sender,
+                    preview: imagePreview(caption: image.caption)
+                )
+            case .reaction(let reaction):
+                upsertReaction(comment: comment, reaction: reaction)
+            case .reactionRemove(let removal):
+                upsertReactionRemove(comment: comment, removal: removal)
             }
         } catch {
             logger.warning("dropped comment <\(comment.id, privacy: .public)>: \(error.localizedDescription, privacy: .public)")
             upsertWeird(comment: comment, error: error)
         }
+    }
+
+    /// Decide whether a freshly-ingested message should fire a local
+    /// notification or silently advance the read watermark. The split
+    /// is by app focus: if the user is looking at Curvy, we treat the
+    /// arrival as "read on sight" and bump the watermark; if not, we
+    /// post a banner and let the dock badge tick up.
+    ///
+    /// Skips messages from the current user (you don't notify
+    /// yourself) and any message whose `createdAt` is at or below the
+    /// existing watermark — that's how out-of-order delivery and
+    /// retries from the polling loop stay quiet.
+    private func announceIfNeeded(
+        commentID: Int,
+        createdAt: Date,
+        sender: String,
+        preview: String
+    ) {
+        if sender == preferences.displayName { return }
+        if let watermark = preferences.lastReadCreatedAt, createdAt <= watermark {
+            return
+        }
+        if isFocused() {
+            let watermark = preferences.lastReadCreatedAt ?? .distantPast
+            preferences.lastReadCreatedAt = max(watermark, createdAt)
+        } else {
+            notifier.post(String(commentID), sender, preview)
+        }
+        refreshUnread()
+    }
+
+    /// One-line preview text for an image notification. We don't ship
+    /// the actual image (it's encrypted, not yet decoded on this Mac)
+    /// — just a textual hint, plus the caption if the sender wrote
+    /// one. Mirrors how iMessage previews "[image]" on attachments
+    /// without a caption.
+    private func imagePreview(caption: String?) -> String {
+        let trimmed = caption?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmed, !trimmed.isEmpty {
+            return "[image] \(trimmed)"
+        }
+        return "[image]"
     }
 
     private func upsertText(comment: GitHubClient.IssueComment, payload: MessagePayload) {
@@ -550,6 +676,183 @@ final class MessageStore {
         )
         descriptor.fetchLimit = 1
         return (try? modelContext.fetch(descriptor))?.first?.updatedAt
+    }
+
+    // MARK: - Reactions (v2)
+
+    /// Send a reaction to `targetID`. Optimistic: a `.reaction`
+    /// `CachedMessage` row appears immediately so the badge can land
+    /// on the bubble corner via `matchedGeometryEffect` before the
+    /// network round-trip completes. Same `commitPending` swap-in-place
+    /// as text sends — the row's negative ID is replaced with the real
+    /// GitHub comment ID without changing `persistentModelID`, so
+    /// SwiftUI's `ForEach` doesn't see a removal+insertion.
+    func sendReaction(targetID: String, emoji: String) async throws {
+        guard let invite = currentInvite, let key = roomKey else {
+            throw SendError.notStarted
+        }
+        let now = Date()
+        let me = preferences.displayName
+        let payload: MessagePayload = .reaction(ReactionMessage(
+            sender: me,
+            targetID: targetID,
+            emoji: emoji,
+            sentAt: now
+        ))
+
+        let pendingID = -Int.random(in: 1...Int.max)
+        let pendingRow = CachedMessage(
+            id: pendingID,
+            kind: .reaction,
+            sender: me,
+            body: emoji,
+            replyTo: nil,
+            sentAt: now,
+            createdAt: now,
+            updatedAt: now,
+            reactionTargetID: targetID
+        )
+        modelContext.insert(pendingRow)
+        try? modelContext.save()
+
+        do {
+            let envelope = try crypto.seal(payload, with: key)
+            let wire = try envelope.encodeForWire()
+            let comment = try await github.postComment(invite: invite, body: wire)
+            commitPendingReaction(pendingRow, withRealComment: comment)
+        } catch {
+            modelContext.delete(pendingRow)
+            try? modelContext.save()
+            throw error
+        }
+    }
+
+    /// Revoke a previously-sent reaction. Same optimistic pattern as
+    /// `sendReaction` — a `.reactionRemove` row appears immediately
+    /// with a fresh `sentAt`, which the render-time aggregator uses to
+    /// flip the badge state off in the same render cycle.
+    func removeReaction(targetID: String, emoji: String) async throws {
+        guard let invite = currentInvite, let key = roomKey else {
+            throw SendError.notStarted
+        }
+        let now = Date()
+        let me = preferences.displayName
+        let payload: MessagePayload = .reactionRemove(ReactionRemoveMessage(
+            sender: me,
+            targetID: targetID,
+            emoji: emoji,
+            sentAt: now
+        ))
+
+        let pendingID = -Int.random(in: 1...Int.max)
+        let pendingRow = CachedMessage(
+            id: pendingID,
+            kind: .reactionRemove,
+            sender: me,
+            body: emoji,
+            replyTo: nil,
+            sentAt: now,
+            createdAt: now,
+            updatedAt: now,
+            reactionTargetID: targetID
+        )
+        modelContext.insert(pendingRow)
+        try? modelContext.save()
+
+        do {
+            let envelope = try crypto.seal(payload, with: key)
+            let wire = try envelope.encodeForWire()
+            let comment = try await github.postComment(invite: invite, body: wire)
+            commitPendingReaction(pendingRow, withRealComment: comment)
+        } catch {
+            modelContext.delete(pendingRow)
+            try? modelContext.save()
+            throw error
+        }
+    }
+
+    /// Promote a pending reaction (or reactionRemove) row to its real
+    /// GitHub comment ID in place. Same race handling as text/image:
+    /// if the polling loop already inserted a row with the real id,
+    /// drop the pending one to avoid a `@Attribute(.unique)` collision.
+    private func commitPendingReaction(
+        _ pendingRow: CachedMessage,
+        withRealComment comment: GitHubClient.IssueComment
+    ) {
+        let realID = comment.id
+        let descriptor = FetchDescriptor<CachedMessage>(predicate: #Predicate { $0.id == realID })
+        let duplicate = (try? modelContext.fetch(descriptor))?.first
+
+        if let duplicate, duplicate.persistentModelID != pendingRow.persistentModelID {
+            modelContext.delete(pendingRow)
+        } else {
+            pendingRow.id = realID
+            pendingRow.createdAt = comment.createdAt
+            pendingRow.updatedAt = comment.updatedAt
+        }
+        try? modelContext.save()
+    }
+
+    private func upsertReaction(
+        comment: GitHubClient.IssueComment,
+        reaction: ReactionMessage
+    ) {
+        let id = comment.id
+        let descriptor = FetchDescriptor<CachedMessage>(predicate: #Predicate { $0.id == id })
+        if let existing = (try? modelContext.fetch(descriptor))?.first {
+            existing.kind = .reaction
+            existing.sender = reaction.sender
+            existing.body = reaction.emoji
+            existing.replyTo = nil
+            existing.sentAt = reaction.sentAt
+            existing.updatedAt = comment.updatedAt
+            existing.reactionTargetID = reaction.targetID
+        } else {
+            let cached = CachedMessage(
+                id: id,
+                kind: .reaction,
+                sender: reaction.sender,
+                body: reaction.emoji,
+                replyTo: nil,
+                sentAt: reaction.sentAt,
+                createdAt: comment.createdAt,
+                updatedAt: comment.updatedAt,
+                reactionTargetID: reaction.targetID
+            )
+            modelContext.insert(cached)
+        }
+        try? modelContext.save()
+    }
+
+    private func upsertReactionRemove(
+        comment: GitHubClient.IssueComment,
+        removal: ReactionRemoveMessage
+    ) {
+        let id = comment.id
+        let descriptor = FetchDescriptor<CachedMessage>(predicate: #Predicate { $0.id == id })
+        if let existing = (try? modelContext.fetch(descriptor))?.first {
+            existing.kind = .reactionRemove
+            existing.sender = removal.sender
+            existing.body = removal.emoji
+            existing.replyTo = nil
+            existing.sentAt = removal.sentAt
+            existing.updatedAt = comment.updatedAt
+            existing.reactionTargetID = removal.targetID
+        } else {
+            let cached = CachedMessage(
+                id: id,
+                kind: .reactionRemove,
+                sender: removal.sender,
+                body: removal.emoji,
+                replyTo: nil,
+                sentAt: removal.sentAt,
+                createdAt: comment.createdAt,
+                updatedAt: comment.updatedAt,
+                reactionTargetID: removal.targetID
+            )
+            modelContext.insert(cached)
+        }
+        try? modelContext.save()
     }
 }
 
