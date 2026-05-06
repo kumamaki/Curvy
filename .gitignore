@@ -22,3 +22,5 @@ mac/Curvy/Resources/Curvy.entitlements
 mac/build/
 mac/dist/
 DerivedData/
+/build/
+/dist/

@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install build tools
+        run: brew install xcodegen create-dmg
+
+      - name: Build Release DMG (unsigned, styled install window)
+        env:
+          OUT_DMG: dist/Curvy-${{ steps.version.outputs.version }}.dmg
+          VOLNAME: Curvy ${{ steps.version.outputs.version }}
+          MARKETING_VERSION: ${{ steps.version.outputs.version }}
+          CURRENT_PROJECT_VERSION: ${{ steps.version.outputs.version }}
+          CODE_SIGN: "no"
+        run: ./scripts/build-dmg.sh
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "Curvy ${{ steps.version.outputs.version }}" \
+            --generate-notes \
+            "dist/Curvy-${{ steps.version.outputs.version }}.dmg"
