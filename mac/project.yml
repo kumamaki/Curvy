@@ -1,0 +1,93 @@
+name: Curvy
+
+options:
+  bundleIdPrefix: dev.kumamaki
+  deploymentTarget:
+    macOS: "26.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    DEAD_CODE_STRIPPING: YES
+    CLANG_ENABLE_MODULES: YES
+
+targets:
+  Curvy:
+    type: application
+    platform: macOS
+    sources:
+      - path: Curvy
+    info:
+      path: Curvy/Resources/Info.plist
+      properties:
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        LSMinimumSystemVersion: "26.0"
+        LSApplicationCategoryType: public.app-category.social-networking
+        NSHumanReadableCopyright: "Curvy. A private group chat over GitHub."
+        NSPrincipalClass: NSApplication
+    entitlements:
+      path: Curvy/Resources/Curvy.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        com.apple.security.files.user-selected.read-write: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.kumamaki.Curvy
+        PRODUCT_NAME: Curvy
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        MARKETING_VERSION: "0.0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Developer ID Application"
+        DEVELOPMENT_TEAM: "4QB74VU5X3"
+        OTHER_CODE_SIGN_FLAGS: "--timestamp=none"
+        COMBINE_HIDPI_IMAGES: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: Curvy
+
+  CurvyTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: CurvyTests
+    dependencies:
+      - target: Curvy
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.kumamaki.CurvyTests
+        PRODUCT_NAME: CurvyTests
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        GENERATE_INFOPLIST_FILE: YES
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Curvy.app/Contents/MacOS/Curvy"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Developer ID Application"
+        DEVELOPMENT_TEAM: "4QB74VU5X3"
+        OTHER_CODE_SIGN_FLAGS: "--timestamp=none"
+
+schemes:
+  Curvy:
+    build:
+      targets:
+        Curvy: all
+        CurvyTests: [test]
+    test:
+      config: Debug
+      targets:
+        - CurvyTests
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
