@@ -21,6 +21,19 @@ struct RootView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(WindowBackground())
+        .navigationTitle("Curvy")
+        // Always-present toolbar so every phase inherits macOS 26's
+        // unified-chrome look (rounded corners, inset traffic lights).
+        // Without a toolbar registered, the window falls back to the
+        // legacy thin titlebar — visible during bootstrap/invite as a
+        // visual jolt when switching to the chat. The placeholder is
+        // a 0-sized clear view; child phases (ChatView) still add their
+        // own toolbar items, which compose with this.
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Color.clear.frame(width: 0, height: 0)
+            }
+        }
     }
 }
 

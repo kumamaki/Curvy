@@ -2,17 +2,17 @@ import AppKit
 import SwiftUI
 
 /// One message in the room — bubble plus optional sender label,
-/// optional reply-thread preview, and the gesture/menu plumbing for
-/// reply and copy. Outgoing bubbles fill `.tint` (Curvy's brand
-/// orange) and have a small "tail corner" at bottom-trailing;
-/// incoming bubbles use `.fill.quaternary` and tail at bottom-leading.
+/// optional reply-thread preview, and the menu plumbing for reply
+/// and copy. Outgoing bubbles fill `.tint` (Curvy's brand orange)
+/// and have a small "tail corner" at bottom-trailing; incoming
+/// bubbles use `curvyInk` (near-black) and tail at bottom-leading.
 /// The asymmetric corner radius is the same trick Telegram desktop
 /// uses to communicate sender direction without resorting to a drawn
 /// path that has to be hand-tuned.
 ///
-/// Reply discoverability is doubled up: right-click for the native
-/// macOS context menu, OR drag right on the bubble. Hovering a bubble
-/// reveals its send-time as a small caption on the opposite side —
+/// Reply discoverability: right-click for the native macOS context
+/// menu, or hover the bubble to reveal a small reply button beside
+/// it. Hovering also surfaces the send-time on the opposite side —
 /// the same affordance Slack desktop uses.
 struct MessageRow: View {
     let message: CachedMessage
@@ -23,14 +23,9 @@ struct MessageRow: View {
     let onCopy: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var dragOffset: CGFloat = 0
-    @State private var crossedThreshold: Bool = false
-    @State private var bubblePulse: CGFloat = 1
     @State private var isHovered: Bool = false
     @State private var isHoveringReply: Bool = false
 
-    private let revealThreshold: CGFloat = 56
-    private let maxDrag: CGFloat = 120
     private let bubbleCorner: CGFloat = 16
     private let bubbleTailCorner: CGFloat = 4
 
@@ -48,15 +43,9 @@ struct MessageRow: View {
                     replyButton
                 }
 
-                ZStack(alignment: .leading) {
-                    replyHintIcon
-                    bubbleColumn
-                        .opacity(isOptimistic ? 0.65 : 1.0)
-                        .scaleEffect(bubblePulse, anchor: isMine ? .trailing : .leading)
-                        .offset(x: dragOffset)
-                        .gesture(dragGesture)
-                        .contextMenu { contextMenuItems }
-                }
+                bubbleColumn
+                    .opacity(isOptimistic ? 0.65 : 1.0)
+                    .contextMenu { contextMenuItems }
 
                 if !isMine {
                     replyButton
@@ -64,6 +53,7 @@ struct MessageRow: View {
                     Spacer(minLength: 60)
                 }
             }
+            .contentShape(Rectangle())
             .onHover { hovering in
                 withAnimation(reduceMotion ? .linear(duration: 0) : .easeInOut(duration: 0.15)) {
                     isHovered = hovering
@@ -105,6 +95,16 @@ struct MessageRow: View {
             .accessibilityLabel("Sent at \(message.sentAt.formatted(date: .omitted, time: .shortened))")
     }
 
+    /// Visible whenever the row is hovered OR the button itself is
+    /// hovered. The OR is what makes the button reachable: when the
+    /// cursor crosses the 6pt gap between bubble and button, the row's
+    /// hover briefly drops (the bubble has its own gesture/menu layers
+    /// which interrupt parent hover propagation), but the button's own
+    /// onHover latches `showActions` true before visibility collapses.
+    private var showActions: Bool {
+        isHovered || isHoveringReply
+    }
+
     private var replyButton: some View {
         Button {
             onReply(message)
@@ -117,8 +117,8 @@ struct MessageRow: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .opacity(isHovered ? 1 : 0)
-        .offset(x: isHovered ? 0 : (isMine ? 6 : -6))
+        .opacity(showActions ? 1 : 0)
+        .offset(x: showActions ? 0 : (isMine ? 6 : -6))
         .scaleEffect(isHoveringReply ? 1.08 : 1.0, anchor: .center)
         .animation(reduceMotion ? .linear(duration: 0) : .easeOut(duration: 0.12), value: isHoveringReply)
         .onHover { hovering in
@@ -126,18 +126,7 @@ struct MessageRow: View {
         }
         .help("Reply")
         .accessibilityLabel("Reply")
-        .allowsHitTesting(isHovered)
-    }
-
-    private var replyHintIcon: some View {
-        Image(systemName: "arrowshape.turn.up.left.fill")
-            .font(.title3)
-            .foregroundStyle(.tint)
-            .symbolRenderingMode(.hierarchical)
-            .frame(width: 28, height: 28)
-            .opacity(min(Double(dragOffset / 50), 1))
-            .scaleEffect(0.5 + min(Double(dragOffset / revealThreshold), 1) * 0.5)
-            .offset(x: -36)
+        .allowsHitTesting(showActions)
     }
 
     /// Whether this message is in its "not yet committed" optimistic
@@ -362,49 +351,5 @@ struct MessageRow: View {
         }
     }
 
-    // MARK: - Drag gesture
-
-    private var dragGesture: some Gesture {
-        DragGesture(minimumDistance: 14)
-            .onChanged { value in
-                let dx = max(0, value.translation.width)
-                let raw = dx > revealThreshold
-                    ? revealThreshold + (dx - revealThreshold) * 0.35
-                    : dx
-                let next = min(raw, maxDrag)
-                if reduceMotion {
-                    dragOffset = next
-                } else {
-                    withAnimation(.interactiveSpring(response: 0.18, dampingFraction: 0.85)) {
-                        dragOffset = next
-                    }
-                }
-                handleThresholdCross()
-            }
-            .onEnded { _ in
-                if dragOffset > revealThreshold {
-                    onReply(message)
-                }
-                withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
-                    dragOffset = 0
-                }
-                crossedThreshold = false
-            }
-    }
-
-    private func handleThresholdCross() {
-        let isPast = dragOffset > revealThreshold
-        guard isPast != crossedThreshold else { return }
-        crossedThreshold = isPast
-        guard isPast else { return }
-        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
-        guard !reduceMotion else { return }
-        withAnimation(.spring(response: 0.22, dampingFraction: 0.6)) {
-            bubblePulse = 1.015
-        }
-        withAnimation(.spring(response: 0.32, dampingFraction: 0.8).delay(0.1)) {
-            bubblePulse = 1
-        }
-    }
 }
 

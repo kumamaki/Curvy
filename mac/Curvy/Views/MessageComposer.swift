@@ -138,6 +138,19 @@ struct MessageComposer: View {
                     sendPulse.toggle()
                     onSend()
                 }
+                // SwiftUI's `TextField(axis: .vertical)` + `.onSubmit`
+                // treats every Return press as a submission, even with
+                // Shift held — so Shift+Return would otherwise send
+                // instead of inserting a newline. Intercept here:
+                // append `\n` and swallow the event when shift is
+                // held, fall through to `.onSubmit` otherwise.
+                .onKeyPress(.return, phases: .down) { press in
+                    guard press.modifiers.contains(.shift) else {
+                        return .ignored
+                    }
+                    draftText.append("\n")
+                    return .handled
+                }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 9)
                 .background(.fill.tertiary, in: .rect(cornerRadius: 18))
@@ -173,7 +186,7 @@ struct MessageComposer: View {
             onSend()
         } label: {
             Image(systemName: "arrow.up.circle.fill")
-                .font(.system(size: 22, weight: .medium))
+                .font(.system(size: 28, weight: .medium))
                 .foregroundStyle(
                     hasContent ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary)
                 )
