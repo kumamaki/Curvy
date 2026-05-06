@@ -55,6 +55,52 @@ mint-extra pat key:
 nuke-keychain:
     security delete-generic-password -s dev.kumamaki.Curvy 2>/dev/null || echo "nothing to delete"
 
+# === Distribution ===========================================================
+
+# Regenerate the DMG install-window background PNGs (commit them; cheap to rebuild).
+dmg-bg:
+    swift scripts/make-dmg-background.swift assets/dmg
+
+# Build a Release Curvy.app and package it into a styled installer at dist/Curvy.dmg
+dmg:
+    ./scripts/build-dmg.sh
+
+# === Release ================================================================
+
+# Bump the latest v* tag (major | minor | patch) and push it. The GitHub Action
+# builds the DMG and attaches it to the release. Requires a clean working tree.
+# First-ever release uses v0.0.0 as the base, so `just ship patch` → v0.0.1.
+ship kind:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{kind}}" in
+      major|minor|patch) ;;
+      *) echo "usage: just ship <major|minor|patch>"; exit 1 ;;
+    esac
+    if [ -n "$(git status --porcelain)" ]; then
+      echo "working tree is dirty — commit or stash first"
+      exit 1
+    fi
+    git fetch --tags --quiet
+    latest=$(git tag --list 'v*' --sort=-version:refname | head -1)
+    latest=${latest:-v0.0.0}
+    if ! [[ "${latest#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      echo "latest tag <${latest}> is not vX.Y.Z — fix manually"
+      exit 1
+    fi
+    IFS=. read -r major minor patch <<< "${latest#v}"
+    case "{{kind}}" in
+      major) major=$((major+1)); minor=0; patch=0 ;;
+      minor) minor=$((minor+1)); patch=0 ;;
+      patch) patch=$((patch+1)) ;;
+    esac
+    new="v${major}.${minor}.${patch}"
+    echo "bumping ${latest} → ${new} ({{kind}})"
+    git tag -a "${new}" -m "Release ${new}"
+    git push origin "${new}"
+    echo "tagged ${new} — workflow:"
+    open https://github.com/kumamaki/Curvy/actions
+
 # === Repos ==================================================================
 
 # Open the source repo on github.com
