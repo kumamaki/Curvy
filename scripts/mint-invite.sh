@@ -6,6 +6,15 @@
 # base64 string to stdout. Hand that string to a friend over Signal —
 # they paste it into Curvy and they're in.
 #
+# Required PAT permissions (fine-grained, scoped to one repo only —
+# the room repo, e.g. kumamaki/curvy-room):
+#   - Issues: Read and write   (v1 — encrypted text via issue comments)
+#   - Contents: Read and write (v3 — encrypted images stored as files
+#                              on the default branch under blobs/)
+#   - Metadata: Read           (auto-included on every fine-grained PAT)
+# Don't grant anything more. The "private repo, narrow PAT" posture is
+# load-bearing for the trust model.
+#
 # Usage:
 #   CURVY_PAT=github_pat_xxx ./scripts/mint-invite.sh
 #   ./scripts/mint-invite.sh github_pat_xxx

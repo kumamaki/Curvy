@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Auto-growing text input that posts on `Return` (and `⌘+Return`)
 /// and inserts a newline on `Shift+Return`. Built on
@@ -16,19 +18,40 @@ import SwiftUI
 /// is a silent no-op rather than a disabled button. The icon fades to
 /// `.tertiary` when empty so VoiceOver users still get a state signal
 /// without a `disabled` modifier.
+///
+/// v3 adds three image-attachment affordances, all routing into the
+/// same `imageDraft` binding which the parent reads when `onSend`
+/// fires:
+///   - paperclip button → `.fileImporter` (NSOpenPanel under the hood)
+///   - drag any image into the composer (file URL or in-memory)
+///   - ⌘V on the composer pastes an image off the clipboard, but only
+///     when the clipboard *has* an image — text pastes still go to
+///     the text field unmolested
 struct MessageComposer: View {
     @Binding var draftText: String
+    @Binding var imageDraft: ImagePipeline.Prepared?
     @Binding var replyingTo: CachedMessage?
     let shakeTrigger: Int
     let onSend: () -> Void
+    let onPickError: (any Error) -> Void
 
     @FocusState private var focused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var sendPulse: Bool = false
     @State private var didFocusOnce: Bool = false
+    @State private var showFileImporter: Bool = false
+    @State private var isDropTargeted: Bool = false
+
+    private let pipeline = ImagePipeline()
 
     private var trimmed: String {
         draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Anything to send? Either typed text OR an attached image counts.
+    /// The send button uses this to decide its tinted-vs-tertiary look.
+    private var hasContent: Bool {
+        !trimmed.isEmpty || imageDraft != nil
     }
 
     var body: some View {
@@ -40,16 +63,33 @@ struct MessageComposer: View {
                     .padding(.bottom, 4)
                     .transition(replyBannerTransition)
             }
+            if let draft = imageDraft {
+                imagePreviewChip(draft)
+                    .padding(.horizontal, 12)
+                    .padding(.top, replyingTo == nil ? 8 : 4)
+                    .padding(.bottom, 4)
+                    .transition(replyBannerTransition)
+            }
             composerRow
         }
         .background(.bar)
-        .overlay(alignment: .top) {
-            Divider()
+        .overlay(alignment: .top) { Divider() }
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(Color.accentColor, lineWidth: 2)
+                    .padding(2)
+                    .allowsHitTesting(false)
+            }
         }
         .modifier(ShakeEffect(shakes: CGFloat(shakeTrigger)))
         .animation(
             reduceMotion ? .linear(duration: 0) : .spring(response: 0.34, dampingFraction: 0.82),
             value: replyingTo?.id
+        )
+        .animation(
+            reduceMotion ? .linear(duration: 0) : .spring(response: 0.34, dampingFraction: 0.82),
+            value: imageDraft != nil
         )
         .animation(
             reduceMotion ? .linear(duration: 0) : .linear(duration: 0.4),
@@ -62,6 +102,26 @@ struct MessageComposer: View {
             guard !didFocusOnce else { return }
             didFocusOnce = true
             focused = true
+        }
+        .fileImporter(
+            isPresented: $showFileImporter,
+            allowedContentTypes: [.image],
+            allowsMultipleSelection: false
+        ) { result in
+            handleFileImporterResult(result)
+        }
+        .onDrop(of: [.image], isTargeted: $isDropTargeted) { providers in
+            handleProviders(providers)
+            return true
+        }
+        // .onPasteCommand only fires when the pasteboard contains one
+        // of the listed UTTypes — text pastes don't trigger this, so
+        // the text field still handles ⌘V for typed content. Note we
+        // list png/jpeg/tiff/heic explicitly because `.image` is an
+        // abstract UTType and some clipboard sources advertise only
+        // a concrete subtype.
+        .onPasteCommand(of: [.image, .png, .jpeg, .tiff, .heic]) { providers in
+            handleProviders(providers)
         }
     }
 
@@ -77,6 +137,7 @@ struct MessageComposer: View {
 
     private var composerRow: some View {
         HStack(alignment: .center, spacing: 10) {
+            attachButton
             TextField("Message", text: $draftText, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(.system(size: 14))
@@ -101,6 +162,20 @@ struct MessageComposer: View {
         .animation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.18), value: draftText)
     }
 
+    private var attachButton: some View {
+        Button {
+            showFileImporter = true
+        } label: {
+            Image(systemName: "photo.fill")
+                .font(.system(size: 18, weight: .medium))
+                .foregroundStyle(imageDraft == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tint))
+                .symbolRenderingMode(.hierarchical)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Attach image")
+        .help("Attach image (or drop / paste an image into the composer)")
+    }
+
     private var sendButton: some View {
         Button {
             sendPulse.toggle()
@@ -109,7 +184,7 @@ struct MessageComposer: View {
             Image(systemName: "arrow.up.circle.fill")
                 .font(.system(size: 22, weight: .medium))
                 .foregroundStyle(
-                    trimmed.isEmpty ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.tint)
+                    hasContent ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary)
                 )
                 .symbolRenderingMode(.hierarchical)
                 .symbolEffect(.bounce.up.byLayer, options: .speed(1.6), value: sendPulse)
@@ -118,6 +193,53 @@ struct MessageComposer: View {
         .keyboardShortcut(.return, modifiers: .command)
         .accessibilityLabel("Send message")
         .help("Send (Return or ⌘↩)")
+    }
+
+    /// The 60-tall preview chip that appears above the text field when
+    /// the user has attached an image. Decodes the prepared JPEG bytes
+    /// back to NSImage for the thumbnail — cheap at chip resolution,
+    /// avoids carrying a separate thumbnail through the type system.
+    private func imagePreviewChip(_ draft: ImagePipeline.Prepared) -> some View {
+        HStack(spacing: 10) {
+            Group {
+                if let nsImage = NSImage(data: draft.bytes) {
+                    Image(nsImage: nsImage)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    Image(systemName: "photo")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 44, height: 44)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Image attached")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tint)
+                Text("\(draft.width)×\(draft.height) · \(formattedBytes(draft.bytes.count))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+
+            Spacer()
+
+            Button {
+                imageDraft = nil
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+                    .symbolRenderingMode(.hierarchical)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Remove attached image")
+            .help("Remove attachment")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.fill.quaternary, in: .rect(cornerRadius: 10))
     }
 
     private func replyBanner(_ target: CachedMessage) -> some View {
@@ -149,6 +271,83 @@ struct MessageComposer: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(.fill.quaternary, in: .rect(cornerRadius: 10))
+    }
+
+    // MARK: - Image input handlers
+
+    private func handleFileImporterResult(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            // Sandbox: file importer URLs are pre-authorized for read.
+            // No security-scoped resource bookkeeping needed because
+            // we're synchronously reading them on the main thread.
+            preparePicked(url: url)
+        case .failure(let error):
+            onPickError(error)
+        }
+    }
+
+    /// Drag-drop and paste both deliver `[NSItemProvider]`. We pick
+    /// the first provider that yields either a file URL or an NSImage
+    /// and run it through the pipeline.
+    private func handleProviders(_ providers: [NSItemProvider]) {
+        guard let provider = providers.first else { return }
+
+        if provider.canLoadObject(ofClass: NSImage.self) {
+            provider.loadObject(ofClass: NSImage.self) { object, error in
+                if let error {
+                    DispatchQueue.main.async { onPickError(error) }
+                    return
+                }
+                guard let image = object as? NSImage else { return }
+                DispatchQueue.main.async { preparePicked(image: image) }
+            }
+            return
+        }
+
+        // Fallback: treat as a file URL. Drag-from-Finder lands here.
+        if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
+                if let error {
+                    DispatchQueue.main.async { onPickError(error) }
+                    return
+                }
+                let url: URL?
+                if let data = item as? Data {
+                    url = URL(dataRepresentation: data, relativeTo: nil)
+                } else if let direct = item as? URL {
+                    url = direct
+                } else {
+                    url = nil
+                }
+                guard let url else { return }
+                DispatchQueue.main.async { preparePicked(url: url) }
+            }
+        }
+    }
+
+    private func preparePicked(url: URL) {
+        do {
+            imageDraft = try pipeline.prepare(url: url)
+        } catch {
+            onPickError(error)
+        }
+    }
+
+    private func preparePicked(image: NSImage) {
+        do {
+            imageDraft = try pipeline.prepare(image: image)
+        } catch {
+            onPickError(error)
+        }
+    }
+
+    private func formattedBytes(_ count: Int) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB]
+        formatter.countStyle = .binary
+        return formatter.string(fromByteCount: Int64(count))
     }
 }
 

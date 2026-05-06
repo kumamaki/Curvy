@@ -321,6 +321,167 @@ struct MessageStoreTests {
         #expect(cached[0].replyTo == "100")
     }
 
+    // MARK: - send (image)
+
+    @Test func sendImageHappyPath() async throws {
+        let context = try makeContext()
+        let prefs = makePreferences()
+        prefs.displayName = "kumamaki"
+
+        // Tiny one-pixel JPEG so we don't depend on real image bytes.
+        let prepared = ImagePipeline.Prepared(
+            bytes: Data([0xFF, 0xD8, 0xFF, 0xD9]),
+            mime: "image/jpeg",
+            width: 1,
+            height: 1
+        )
+
+        let routes = LockBox<[String]>([])
+        let putResponse = """
+        {
+          "content": { "sha": "abcsha", "path": "blobs/x.bin", "name": "x.bin", "size": 4 },
+          "commit": { "sha": "deadbeef" }
+        }
+        """
+        let postResponse = """
+        {
+          "id": 999,
+          "body": "ignored",
+          "created_at": "2026-05-06T12:00:00Z",
+          "updated_at": "2026-05-06T12:00:00Z"
+        }
+        """
+        let store = MessageStore(
+            modelContext: context,
+            github: GitHubClient(transport: mockTransport { request in
+                let path = request.url?.path ?? ""
+                routes.set(routes.get() + [path])
+                if path.contains("/contents/blobs/") {
+                    return (201, Data(putResponse.utf8))
+                } else if path.contains("/issues/") {
+                    return (201, Data(postResponse.utf8))
+                }
+                return (404, Data())
+            }),
+            preferences: prefs,
+            isFocused: { true }
+        )
+        store.start(invite: invite, beginPolling: false)
+        try await store.sendImage(prepared: prepared, caption: "look", replyTo: nil)
+
+        let cached = try cachedMessages(in: context)
+        #expect(cached.count == 1)
+        #expect(cached[0].id == 999)
+        #expect(cached[0].kind == .image)
+        #expect(cached[0].sender == "kumamaki")
+        #expect(cached[0].body == "look")
+        #expect(cached[0].assetSha == "abcsha")
+        #expect(cached[0].assetPath == "blobs/x.bin")
+        #expect(cached[0].imageMime == "image/jpeg")
+
+        // PUT must come before POST — orphan GC requires that order.
+        let routesList = routes.get()
+        let putIdx = routesList.firstIndex { $0.contains("/contents/") } ?? -1
+        let postIdx = routesList.firstIndex { $0.contains("/issues/") } ?? -1
+        #expect(putIdx >= 0)
+        #expect(postIdx > putIdx, "PUT contents must precede POST comment so orphan-GC has something to roll back")
+    }
+
+    @Test func sendImageGCsOrphanWhenCommentFails() async throws {
+        let context = try makeContext()
+        let prepared = ImagePipeline.Prepared(
+            bytes: Data([0xFF, 0xD8, 0xFF, 0xD9]),
+            mime: "image/jpeg",
+            width: 1,
+            height: 1
+        )
+        let routes = LockBox<[(method: String, path: String)]>([])
+        let putResponse = """
+        {
+          "content": { "sha": "orphansha", "path": "blobs/orphan.bin", "name": "orphan.bin", "size": 4 },
+          "commit": { "sha": "deadbeef" }
+        }
+        """
+        let store = MessageStore(
+            modelContext: context,
+            github: GitHubClient(transport: mockTransport { request in
+                let method = request.httpMethod ?? "?"
+                let path = request.url?.path ?? ""
+                routes.set(routes.get() + [(method, path)])
+                if method == "PUT" && path.contains("/contents/") {
+                    return (201, Data(putResponse.utf8))
+                } else if method == "POST" && path.contains("/issues/") {
+                    return (500, Data("server sad".utf8))  // fail the comment post
+                } else if method == "DELETE" && path.contains("/contents/") {
+                    return (200, Data("{}".utf8))
+                }
+                return (404, Data())
+            }),
+            preferences: makePreferences(),
+            isFocused: { true }
+        )
+        store.start(invite: invite, beginPolling: false)
+        do {
+            try await store.sendImage(prepared: prepared, caption: nil, replyTo: nil)
+            Issue.record("expected sendImage to throw on comment failure")
+        } catch {
+            // expected
+        }
+
+        let routesList = routes.get()
+        let methods = routesList.map(\.method)
+        #expect(methods.contains("PUT"))
+        #expect(methods.contains("POST"))
+        #expect(methods.contains("DELETE"), "DELETE must fire to GC the orphaned blob")
+
+        // Pending row should be gone.
+        let cached = try cachedMessages(in: context)
+        #expect(cached.isEmpty, "pending row should be deleted on send failure")
+    }
+
+    @Test func pollOnceIngestsImageComments() async throws {
+        let context = try makeContext()
+        let body = try issueCommentsJSON([
+            (id: 800, payload: .image(ImageMessage(
+                sender: "alice",
+                assetPath: "blobs/foo.bin",
+                assetSha: "abcsha",
+                mime: "image/jpeg",
+                keyB64: Data(repeating: 0x01, count: 32).base64EncodedString(),
+                nonceB64: Data(repeating: 0x02, count: 12).base64EncodedString(),
+                size: 100,
+                width: 800,
+                height: 600,
+                caption: "look",
+                replyTo: nil,
+                sentAt: Date(timeIntervalSince1970: 1_750_000_000)
+            )), createdAt: "2026-05-06T12:00:00Z", updatedAt: "2026-05-06T12:00:00Z")
+        ])
+        let store = MessageStore(
+            modelContext: context,
+            github: GitHubClient(transport: mockTransport { _ in (200, body) }),
+            preferences: makePreferences(),
+            isFocused: { true }
+        )
+        store.start(invite: invite, beginPolling: false)
+        await store.pollOnce()
+
+        let cached = try cachedMessages(in: context)
+        #expect(cached.count == 1)
+        #expect(cached[0].id == 800)
+        #expect(cached[0].kind == .image)
+        #expect(cached[0].sender == "alice")
+        #expect(cached[0].body == "look")
+        #expect(cached[0].assetPath == "blobs/foo.bin")
+        #expect(cached[0].assetSha == "abcsha")
+        #expect(cached[0].imageMime == "image/jpeg")
+        #expect(cached[0].imageWidth == 800)
+        #expect(cached[0].imageHeight == 600)
+        // imageCachedAt is nil until BlobFetcher materializes the
+        // bytes, which happens in a fire-and-forget Task we don't
+        // synchronize on here.
+    }
+
     // MARK: - watermark
 
     @Test func subsequentPollsUseLatestUpdatedAtAsSince() async throws {

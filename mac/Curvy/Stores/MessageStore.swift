@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 import Observation
 import OSLog
@@ -44,6 +45,7 @@ final class MessageStore {
     @ObservationIgnored private let github: GitHubClient
     @ObservationIgnored private let crypto: RoomCrypto
     @ObservationIgnored private let preferences: Preferences
+    @ObservationIgnored private let blobFetcher: BlobFetcher
     @ObservationIgnored private let isFocused: @MainActor () -> Bool
     @ObservationIgnored private let logger = Logger(subsystem: "dev.kumamaki.Curvy", category: "MessageStore")
 
@@ -56,11 +58,13 @@ final class MessageStore {
          github: GitHubClient = GitHubClient(),
          crypto: RoomCrypto = RoomCrypto(),
          preferences: Preferences = Preferences(),
+         blobFetcher: BlobFetcher? = nil,
          isFocused: @escaping @MainActor () -> Bool = { NSApplication.shared.isActive }) {
         self.modelContext = modelContext
         self.github = github
         self.crypto = crypto
         self.preferences = preferences
+        self.blobFetcher = blobFetcher ?? BlobFetcher(github: github, modelContext: modelContext)
         self.isFocused = isFocused
     }
 
@@ -100,7 +104,7 @@ final class MessageStore {
         status = .idle
     }
 
-    // MARK: - Send
+    // MARK: - Send (text)
 
     /// Seal `text` against the room key, post it as a comment on the
     /// room issue, and upsert the result into the local cache.
@@ -178,6 +182,203 @@ final class MessageStore {
         try? modelContext.save()
     }
 
+    // MARK: - Send (image — v3)
+
+    /// Send an encrypted image. Three round-trips on the wire, each
+    /// against `api.github.com` only:
+    ///
+    /// 1. PUT the AES-GCM ciphertext to `blobs/<uuid>.bin` via the
+    ///    Contents API (creates a commit on the `blobs` branch).
+    /// 2. POST the room-key-sealed envelope to Issue #1's comments,
+    ///    referencing the new file's `path` + `sha`.
+    /// 3. (Failure path only) DELETE the orphan file if the comment
+    ///    POST fails — keeps `curvy-room` from accreting unreferenced
+    ///    ciphertext.
+    ///
+    /// Optimistic UI: a `.pendingImage` row appears immediately with
+    /// the locally-stashed JPEG bytes so the bubble renders before
+    /// either network call lands. On success the row updates in place
+    /// to `.image` with the real GitHub comment ID. On failure the
+    /// pending row is removed and the error rethrows.
+    func sendImage(
+        prepared: ImagePipeline.Prepared,
+        caption: String?,
+        replyTo: String? = nil
+    ) async throws {
+        guard let invite = currentInvite, let key = roomKey else {
+            throw SendError.notStarted
+        }
+        let now = Date()
+        let captionForBody = (caption?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+
+        // Fresh per-file AES-GCM key + nonce. The room key never
+        // touches the blob host: only this throwaway key does, and
+        // it's wrapped inside the room-key-sealed envelope below.
+        let perFileKey = SymmetricKey(size: .bits256)
+        let perFileNonce = AES.GCM.Nonce()
+        let sealed: AES.GCM.SealedBox
+        do {
+            sealed = try AES.GCM.seal(prepared.bytes, using: perFileKey, nonce: perFileNonce)
+        } catch {
+            throw error
+        }
+        let ciphertext = sealed.ciphertext + sealed.tag
+
+        let perFileKeyData = perFileKey.withUnsafeBytes { Data($0) }
+        let keyB64 = perFileKeyData.base64EncodedString()
+        let nonceB64 = Data(perFileNonce).base64EncodedString()
+
+        // Stash the JPEG bytes locally before any network call so the
+        // pending bubble can render immediately. Same cache directory
+        // as confirmed images, but keyed by the negative pending ID so
+        // it can't collide with a real path. We re-link to the real
+        // path on commit.
+        let pendingID = -Int.random(in: 1...Int.max)
+        let pendingFilename = "pending-\(abs(pendingID)).jpg"
+        let pendingCacheURL = BlobFetcher.cacheDirectory.appending(path: pendingFilename, directoryHint: .notDirectory)
+        do {
+            try FileManager.default.createDirectory(at: BlobFetcher.cacheDirectory, withIntermediateDirectories: true)
+            try prepared.bytes.write(to: pendingCacheURL, options: .atomic)
+        } catch {
+            logger.warning("couldn't stash pending image: \(error.localizedDescription, privacy: .public)")
+            // Non-fatal — the bubble will just show a placeholder
+            // until the first poll cycle materializes the real file.
+        }
+
+        let assetPath = "blobs/\(UUID().uuidString.lowercased()).bin"
+        let pendingRow = CachedMessage(
+            id: pendingID,
+            kind: .pendingImage,
+            sender: preferences.displayName,
+            body: captionForBody ?? "",
+            replyTo: replyTo,
+            sentAt: now,
+            createdAt: now,
+            updatedAt: now,
+            assetPath: assetPath,
+            assetSha: nil, // not yet known — populated post-PUT
+            imageMime: prepared.mime,
+            imageWidth: prepared.width,
+            imageHeight: prepared.height,
+            imageKeyB64: keyB64,
+            imageNonceB64: nonceB64,
+            imageCachedAt: Date() // local sidecar lives at pendingCacheURL
+        )
+        modelContext.insert(pendingRow)
+        try? modelContext.save()
+
+        var assetSha: String?
+        do {
+            // 1. Upload ciphertext to the default branch at `blobs/
+            //    <uuid>.bin`. On an empty repo (zero commits) this
+            //    creates the initial commit. On a populated repo it
+            //    appends a new commit. No separate branch — files
+            //    live alongside any other repo content.
+            let ref = try await github.putContent(
+                invite: invite,
+                path: assetPath,
+                bytes: ciphertext
+            )
+            assetSha = ref.sha
+
+            // 2. Build + seal + post the message envelope.
+            let payload: MessagePayload = .image(ImageMessage(
+                sender: preferences.displayName,
+                assetPath: ref.path,
+                assetSha: ref.sha,
+                mime: prepared.mime,
+                keyB64: keyB64,
+                nonceB64: nonceB64,
+                size: ciphertext.count,
+                width: prepared.width,
+                height: prepared.height,
+                caption: captionForBody,
+                replyTo: replyTo,
+                sentAt: now
+            ))
+            do {
+                let envelope = try crypto.seal(payload, with: key)
+                let wire = try envelope.encodeForWire()
+                let comment = try await github.postComment(invite: invite, body: wire)
+                commitPendingImage(
+                    pendingRow,
+                    withRealComment: comment,
+                    pendingCacheURL: pendingCacheURL,
+                    assetPath: ref.path,
+                    assetSha: ref.sha
+                )
+            } catch {
+                // 3. Comment failed — orphan-GC the file we just
+                //    uploaded. Best-effort; if the delete also fails
+                //    we accept the orphan (unreadable without the
+                //    per-file key, which only ever existed locally).
+                logger.error("comment post failed after PUT, GC'ing <\(ref.path, privacy: .public)>: \(String(describing: error), privacy: .public)")
+                if let sha = assetSha {
+                    do {
+                        try await github.deleteContent(
+                            invite: invite,
+                            path: ref.path,
+                            sha: sha
+                        )
+                    } catch {
+                        logger.error("orphan asset GC failed for <\(ref.path, privacy: .public)>: \(String(describing: error), privacy: .public)")
+                    }
+                }
+                throw error
+            }
+        } catch {
+            logger.error("sendImage failed at <\(assetPath, privacy: .public)>: \(String(describing: error), privacy: .public)")
+            modelContext.delete(pendingRow)
+            try? modelContext.save()
+            try? FileManager.default.removeItem(at: pendingCacheURL)
+            throw error
+        }
+    }
+
+    /// Promote a pending image row to a confirmed `.image` row.
+    /// Re-links the locally-stashed sidecar to its content-addressable
+    /// final filename (`<uuid>.bin`) so the cache key matches what
+    /// receivers will compute, and bumps the row to its real GitHub
+    /// comment ID — same in-place id swap as `commitPending` for text.
+    ///
+    /// Same race handling as the text case: if the polling loop
+    /// already inserted a row with the real id, drop the pending row
+    /// instead of conflicting on `@Attribute(.unique)`.
+    private func commitPendingImage(
+        _ pendingRow: CachedMessage,
+        withRealComment comment: GitHubClient.IssueComment,
+        pendingCacheURL: URL,
+        assetPath: String,
+        assetSha: String
+    ) {
+        let realID = comment.id
+        let descriptor = FetchDescriptor<CachedMessage>(predicate: #Predicate { $0.id == realID })
+        let duplicate = (try? modelContext.fetch(descriptor))?.first
+
+        // Move the sidecar JPEG to its content-addressable name so the
+        // receiver-side cache lookup in `MessageRow` finds it.
+        let finalCacheURL = BlobFetcher.cacheURL(for: assetPath)
+        do {
+            try? FileManager.default.removeItem(at: finalCacheURL)
+            try FileManager.default.moveItem(at: pendingCacheURL, to: finalCacheURL)
+        } catch {
+            logger.warning("couldn't relink pending sidecar to <\(assetPath, privacy: .public)>: \(error.localizedDescription, privacy: .public)")
+        }
+
+        if let duplicate, duplicate.persistentModelID != pendingRow.persistentModelID {
+            modelContext.delete(pendingRow)
+        } else {
+            pendingRow.id = realID
+            pendingRow.kind = .image
+            pendingRow.assetPath = assetPath
+            pendingRow.assetSha = assetSha
+            pendingRow.createdAt = comment.createdAt
+            pendingRow.updatedAt = comment.updatedAt
+            pendingRow.imageCachedAt = Date()
+        }
+        try? modelContext.save()
+    }
+
     // MARK: - Polling
 
     /// Single poll iteration. Public so tests can drive ingestion
@@ -188,7 +389,7 @@ final class MessageStore {
             let since = currentWatermark()
             let comments = try await github.listComments(invite: invite, since: since)
             for comment in comments {
-                ingest(comment: comment, key: key)
+                ingest(comment: comment, invite: invite, key: key)
             }
             consecutiveErrors = 0
             status = .polling
@@ -223,13 +424,15 @@ final class MessageStore {
 
     // MARK: - Ingest
 
-    private func ingest(comment: GitHubClient.IssueComment, key: Data) {
+    private func ingest(comment: GitHubClient.IssueComment, invite: Invite, key: Data) {
         do {
             let envelope = try MessageEnvelope.decode(comment.body)
             let payload = try crypto.open(envelope, with: key)
             switch payload {
             case .text:
                 upsertText(comment: comment, payload: payload)
+            case .image(let image):
+                upsertImage(comment: comment, image: image, invite: invite, key: key)
             }
         } catch {
             logger.warning("dropped comment <\(comment.id, privacy: .public)>: \(error.localizedDescription, privacy: .public)")
@@ -262,6 +465,60 @@ final class MessageStore {
             modelContext.insert(cached)
         }
         try? modelContext.save()
+    }
+
+    private func upsertImage(
+        comment: GitHubClient.IssueComment,
+        image: ImageMessage,
+        invite: Invite,
+        key: Data
+    ) {
+        let id = comment.id
+        let descriptor = FetchDescriptor<CachedMessage>(predicate: #Predicate { $0.id == id })
+
+        let row: CachedMessage
+        if let existing = (try? modelContext.fetch(descriptor))?.first {
+            existing.kind = .image
+            existing.sender = image.sender
+            existing.body = image.caption ?? ""
+            existing.replyTo = image.replyTo
+            existing.sentAt = image.sentAt
+            existing.updatedAt = comment.updatedAt
+            existing.assetPath = image.assetPath
+            existing.assetSha = image.assetSha
+            existing.imageMime = image.mime
+            existing.imageWidth = image.width
+            existing.imageHeight = image.height
+            existing.imageKeyB64 = image.keyB64
+            existing.imageNonceB64 = image.nonceB64
+            row = existing
+        } else {
+            let cached = CachedMessage(
+                id: id,
+                kind: .image,
+                sender: image.sender,
+                body: image.caption ?? "",
+                replyTo: image.replyTo,
+                sentAt: image.sentAt,
+                createdAt: comment.createdAt,
+                updatedAt: comment.updatedAt,
+                assetPath: image.assetPath,
+                assetSha: image.assetSha,
+                imageMime: image.mime,
+                imageWidth: image.width,
+                imageHeight: image.height,
+                imageKeyB64: image.keyB64,
+                imageNonceB64: image.nonceB64,
+                imageCachedAt: nil
+            )
+            modelContext.insert(cached)
+            row = cached
+        }
+        try? modelContext.save()
+
+        // Kick off the receive-side download + decrypt. Idempotent —
+        // a no-op on cache hit, deduped against in-flight assets.
+        blobFetcher.materialize(row, invite: invite, roomKey: key)
     }
 
     private func upsertWeird(comment: GitHubClient.IssueComment, error: any Error) {

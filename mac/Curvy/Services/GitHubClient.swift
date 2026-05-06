@@ -2,7 +2,12 @@ import Foundation
 
 /// Thin wrapper over GitHub's REST API. The endpoints v1 needs:
 /// `verifyAccess` to gate onboarding, `listComments` to pull new
-/// messages from the room issue, `postComment` to send one.
+/// messages from the room issue, `postComment` to send one. v3 adds
+/// the Contents API surface for encrypted image blobs: `putContent`,
+/// `getContent`, `deleteContent`. Everything goes through
+/// `api.github.com` only — we deliberately avoid `uploads.github.com`
+/// and `*.githubusercontent.com` (except the API host itself) because
+/// those are blocked on at least one of the friends' networks.
 ///
 /// No shared mutable state, so this is a `Sendable` struct rather than
 /// an actor. The transport closure is injected so tests can hand in
@@ -19,6 +24,7 @@ struct GitHubClient: Sendable {
         case http(Int, String)
         case decoding(any Error)
         case invalidResponse
+        case contentTooLargeForInline
 
         var description: String {
             switch self {
@@ -28,6 +34,7 @@ struct GitHubClient: Sendable {
             case .http(let code, let body): "HTTP \(code): \(body)"
             case .decoding(let err): "couldn't decode GitHub's response (\(err))"
             case .invalidResponse: "GitHub returned a non-HTTP response"
+            case .contentTooLargeForInline: "Contents API returned no inline content (file >1 MB) — caller must fall back to Git Blobs API"
             }
         }
     }
@@ -48,11 +55,23 @@ struct GitHubClient: Sendable {
         let updatedAt: Date
     }
 
+    /// Result of a successful `putContent` — what the Contents API
+    /// returns inside the `content` object on a create or update.
+    /// We pull only the SHA (needed for later DELETE / blobs GET) and
+    /// the path (echo-back, useful for sanity checks). Everything else
+    /// from the GitHub response is discarded.
+    struct ContentRef: Sendable, Equatable {
+        let path: String
+        let sha: String
+    }
+
     private let transport: Transport
 
     init(transport: @escaping Transport = { try await URLSession.shared.data(for: $0) }) {
         self.transport = transport
     }
+
+    // MARK: - Onboarding + comments (v1)
 
     /// Validates an `Invite` by hitting `GET /repos/:owner/:repo`. A
     /// 200 response means the token works and has access to the repo —
@@ -110,6 +129,207 @@ struct GitHubClient: Sendable {
             return try Self.decoder.decode(IssueComment.self, from: data)
         } catch {
             throw GitHubError.decoding(error)
+        }
+    }
+
+    // MARK: - Contents API (v3)
+
+    /// Create or update a file at `path`. The bytes are base64-encoded
+    /// into the JSON body — that's the Contents API's only encoding,
+    /// no raw-binary path. Returns the new file's SHA and path,
+    /// captured into a small `ContentRef`.
+    ///
+    /// `branch` is nil by default, which uses the repository's default
+    /// branch (`main` for fresh repos). **Even on an empty repo with
+    /// zero commits**, this works — the Contents API creates the
+    /// initial commit AND the file in one operation. Trying to write
+    /// to a *named* branch that doesn't exist would fail; using the
+    /// default branch sidesteps that bootstrap problem entirely. We
+    /// deliberately don't isolate blobs onto a separate branch since
+    /// `curvy-room` is bot-only and the 4-person model never opens
+    /// the repo's web UI.
+    ///
+    /// `committer` is set to a synthetic identity rather than reading
+    /// from the PAT owner's git config — keeps kumamaki's real email
+    /// out of the commit log even in the private-repo case.
+    ///
+    /// On filename collision, this becomes an UPDATE, not an error.
+    /// Callers should pass UUID-based paths to avoid the implicit
+    /// update semantics.
+    func putContent(
+        invite: Invite,
+        path: String,
+        bytes: Data,
+        branch: String? = nil,
+        message: String = "blob"
+    ) async throws -> ContentRef {
+        var body: [String: Any] = [
+            "message": message,
+            "content": bytes.base64EncodedString(),
+            "committer": [
+                "name": "Curvy",
+                "email": "noreply@curvy.local",
+            ],
+        ]
+        if let branch {
+            body["branch"] = branch
+        }
+        let payload = try JSONSerialization.data(withJSONObject: body)
+        let request = authenticatedRequest(
+            path: "/repos/\(invite.owner)/\(invite.repo)/contents/\(path)",
+            method: "PUT",
+            body: payload,
+            token: invite.token
+        )
+        let data = try await execute(request)
+        // GitHub's response shape: { content: { sha, path, ... },
+        // commit: { sha, ... } }. We only need the file SHA.
+        struct Envelope: Decodable {
+            struct Content: Decodable {
+                let sha: String
+                let path: String
+            }
+            let content: Content
+        }
+        do {
+            let env = try Self.decoder.decode(Envelope.self, from: data)
+            return ContentRef(path: env.content.path, sha: env.content.sha)
+        } catch {
+            throw GitHubError.decoding(error)
+        }
+    }
+
+    /// Read the bytes of `path` on `branch`. For files **≤ 1 MB** the
+    /// Contents API returns base64 content inline — one round-trip.
+    /// For larger files, the API responds with `encoding: "none"` and
+    /// no content; we fall back to the Git Blobs API using the SHA
+    /// reported in the same response.
+    ///
+    /// We pass `assetSha` directly when the caller already has it (the
+    /// common case — it's stored in the message envelope). When non-
+    /// nil, we skip the Contents API entirely and go straight to the
+    /// Blobs API for a uniform code path. Saves bandwidth on the bytes
+    /// we already know we want.
+    func getContent(
+        invite: Invite,
+        path: String,
+        branch: String? = nil,
+        knownSha: String? = nil
+    ) async throws -> Data {
+        if let sha = knownSha {
+            return try await getBlob(invite: invite, sha: sha)
+        }
+
+        var query: [URLQueryItem] = []
+        if let branch {
+            query.append(URLQueryItem(name: "ref", value: branch))
+        }
+        let request = authenticatedRequest(
+            path: "/repos/\(invite.owner)/\(invite.repo)/contents/\(path)",
+            queryItems: query,
+            token: invite.token
+        )
+        let data = try await execute(request)
+
+        struct Response: Decodable {
+            let content: String?
+            let encoding: String?
+            let sha: String
+            let size: Int
+        }
+        let response: Response
+        do {
+            response = try Self.decoder.decode(Response.self, from: data)
+        } catch {
+            throw GitHubError.decoding(error)
+        }
+
+        if response.encoding == "base64", let inline = response.content {
+            // The Contents API wraps base64 at column 60 with embedded
+            // newlines. `Data(base64Encoded:)` rejects whitespace by
+            // default — `.ignoreUnknownCharacters` strips the wrap.
+            guard let bytes = Data(base64Encoded: inline, options: .ignoreUnknownCharacters) else {
+                throw GitHubError.decoding(NSError(domain: "Curvy.GitHubClient", code: -1, userInfo: [
+                    NSLocalizedDescriptionKey: "Contents API returned non-base64 content"
+                ]))
+            }
+            return bytes
+        }
+
+        // File >1 MB: fall back to Blobs API using the SHA we just
+        // learned. One extra round-trip, same `api.github.com` host.
+        return try await getBlob(invite: invite, sha: response.sha)
+    }
+
+    /// Fetch a blob's bytes by SHA via the Git Blobs API. Always
+    /// returns base64-encoded content regardless of size — we just
+    /// strip the wrapping and decode. Goes through `api.github.com`,
+    /// the only GitHub host we rely on.
+    func getBlob(invite: Invite, sha: String) async throws -> Data {
+        let request = authenticatedRequest(
+            path: "/repos/\(invite.owner)/\(invite.repo)/git/blobs/\(sha)",
+            token: invite.token
+        )
+        let data = try await execute(request)
+        struct BlobResponse: Decodable {
+            let content: String
+            let encoding: String
+        }
+        let response: BlobResponse
+        do {
+            response = try Self.decoder.decode(BlobResponse.self, from: data)
+        } catch {
+            throw GitHubError.decoding(error)
+        }
+        guard response.encoding == "base64" else {
+            throw GitHubError.decoding(NSError(domain: "Curvy.GitHubClient", code: -2, userInfo: [
+                NSLocalizedDescriptionKey: "Blobs API returned encoding <\(response.encoding)>, expected base64"
+            ]))
+        }
+        guard let bytes = Data(base64Encoded: response.content, options: .ignoreUnknownCharacters) else {
+            throw GitHubError.decoding(NSError(domain: "Curvy.GitHubClient", code: -3, userInfo: [
+                NSLocalizedDescriptionKey: "Blobs API returned non-base64 content"
+            ]))
+        }
+        return bytes
+    }
+
+    /// Delete a file at `path` on `branch`. The Contents API requires
+    /// the file's current SHA in the request body — that's the
+    /// optimistic-concurrency check, and why we always store the SHA
+    /// alongside the path in the message envelope.
+    ///
+    /// 404 is swallowed (file already gone is not an error condition
+    /// for orphan-GC).
+    func deleteContent(
+        invite: Invite,
+        path: String,
+        sha: String,
+        branch: String? = nil,
+        message: String = "blob-gc"
+    ) async throws {
+        var body: [String: Any] = [
+            "message": message,
+            "sha": sha,
+            "committer": [
+                "name": "Curvy",
+                "email": "noreply@curvy.local",
+            ],
+        ]
+        if let branch {
+            body["branch"] = branch
+        }
+        let payload = try JSONSerialization.data(withJSONObject: body)
+        let request = authenticatedRequest(
+            path: "/repos/\(invite.owner)/\(invite.repo)/contents/\(path)",
+            method: "DELETE",
+            body: payload,
+            token: invite.token
+        )
+        do {
+            _ = try await execute(request)
+        } catch GitHubError.http(let code, _) where code == 404 {
+            // Already gone — fine.
         }
     }
 

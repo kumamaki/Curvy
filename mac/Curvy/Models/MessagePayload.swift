@@ -1,16 +1,18 @@
 import Foundation
 
 /// Polymorphic plaintext for a single message inside a sealed envelope.
-/// The `type` discriminator on the wire selects the case; v1 only has
-/// `.text` but the enum is shaped so that v2 reactions and v3/v4
-/// images/files plug in by adding a new case here and a matching value
-/// in `Kind`. Existing clients reject unknown discriminators rather
-/// than silently dropping content — fail loud, not soft.
+/// The `type` discriminator on the wire selects the case; v1 added
+/// `.text`, v3 adds `.image`. The enum is shaped so v2 reactions and
+/// v4 generic files plug in by adding a new case here and a matching
+/// value in `Kind`. Existing clients reject unknown discriminators
+/// rather than silently dropping content — fail loud, not soft.
 enum MessagePayload: Codable, Sendable, Equatable {
     case text(TextMessage)
+    case image(ImageMessage)
 
     enum Kind: String, Codable, Sendable {
         case text
+        case image
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -23,6 +25,8 @@ enum MessagePayload: Codable, Sendable, Equatable {
         switch kind {
         case .text:
             self = .text(try TextMessage(from: decoder))
+        case .image:
+            self = .image(try ImageMessage(from: decoder))
         }
     }
 
@@ -31,6 +35,9 @@ enum MessagePayload: Codable, Sendable, Equatable {
         switch self {
         case .text(let message):
             try container.encode(Kind.text, forKey: .type)
+            try message.encode(to: encoder)
+        case .image(let message):
+            try container.encode(Kind.image, forKey: .type)
             try message.encode(to: encoder)
         }
     }
@@ -73,7 +80,7 @@ struct TextMessage: Codable, Sendable, Equatable {
         // than human readability we never use. Normalising through the
         // same Int64-ms conversion at construction guarantees every
         // TextMessage's sentAt is the canonical wire-stable Double.
-        self.sentAt = Self.canonicalDate(from: sentAt)
+        self.sentAt = canonicalDate(from: sentAt)
     }
 
     init(from decoder: Decoder) throws {
@@ -98,10 +105,140 @@ struct TextMessage: Codable, Sendable, Equatable {
         let ms = Int64((sentAt.timeIntervalSince1970 * 1000).rounded())
         try container.encode(ms, forKey: .sentAt)
     }
+}
 
-    private static func canonicalDate(from date: Date) -> Date {
-        let ms = Int64((date.timeIntervalSince1970 * 1000).rounded())
-        return Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+/// An image message inside an encrypted envelope.
+///
+/// The image bytes themselves are NOT in this struct — they live as a
+/// committed file on `curvy-room`'s `blobs` branch at `assetPath`,
+/// encrypted under a fresh per-file AES-GCM key (`keyB64`/`nonceB64`).
+/// The per-file key is wrapped here, inside the room-key envelope, so
+/// the room key never touches the blob host: a leaked file URL without
+/// the envelope reveals only opaque ciphertext.
+///
+/// Why path + sha and not the original spec's `asset_id` numeric:
+/// originally we planned to use GitHub Releases assets (numeric IDs),
+/// but `uploads.github.com` and `release-assets.githubusercontent.com`
+/// are blocked from at least one of our networks. We pivoted to the
+/// Contents API, which addresses files by path + git SHA. Path is
+/// stable and predictable (`blobs/<uuid>.bin`); SHA is what the Git
+/// Blobs API GET takes and what the Contents API DELETE requires in
+/// the request body.
+///
+/// The optional fields (`width`, `height`, `caption`, `replyTo`) are
+/// extensions over the original `CLAUDE.md` sketch — old text-only
+/// clients reject the whole `.image` discriminator anyway, so adding
+/// optionals here doesn't break anything that wasn't already going to
+/// hit the `.weird` path.
+struct ImageMessage: Codable, Sendable, Equatable {
+    let sender: String
+    let assetPath: String
+    let assetSha: String
+    let mime: String
+    let keyB64: String
+    let nonceB64: String
+    let size: Int
+    let width: Int?
+    let height: Int?
+    let caption: String?
+    let replyTo: String?
+    let sentAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case sender
+        case assetPath = "asset_path"
+        case assetSha = "asset_sha"
+        case mime
+        case keyB64 = "key"
+        case nonceB64 = "nonce"
+        case size
+        case width
+        case height
+        case caption
+        case replyTo = "reply_to"
+        case sentAt = "sent_at"
     }
+
+    init(sender: String,
+         assetPath: String,
+         assetSha: String,
+         mime: String,
+         keyB64: String,
+         nonceB64: String,
+         size: Int,
+         width: Int?,
+         height: Int?,
+         caption: String?,
+         replyTo: String?,
+         sentAt: Date) {
+        self.sender = sender
+        self.assetPath = assetPath
+        self.assetSha = assetSha
+        self.mime = mime
+        self.keyB64 = keyB64
+        self.nonceB64 = nonceB64
+        self.size = size
+        self.width = width
+        self.height = height
+        self.caption = caption
+        self.replyTo = replyTo
+        self.sentAt = canonicalDate(from: sentAt)
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let sender = try container.decode(String.self, forKey: .sender)
+        let assetPath = try container.decode(String.self, forKey: .assetPath)
+        let assetSha = try container.decode(String.self, forKey: .assetSha)
+        let mime = try container.decode(String.self, forKey: .mime)
+        let keyB64 = try container.decode(String.self, forKey: .keyB64)
+        let nonceB64 = try container.decode(String.self, forKey: .nonceB64)
+        let size = try container.decode(Int.self, forKey: .size)
+        let width = try container.decodeIfPresent(Int.self, forKey: .width)
+        let height = try container.decodeIfPresent(Int.self, forKey: .height)
+        let caption = try container.decodeIfPresent(String.self, forKey: .caption)
+        let replyTo = try container.decodeIfPresent(String.self, forKey: .replyTo)
+        let ms = try container.decode(Int64.self, forKey: .sentAt)
+        self.init(
+            sender: sender,
+            assetPath: assetPath,
+            assetSha: assetSha,
+            mime: mime,
+            keyB64: keyB64,
+            nonceB64: nonceB64,
+            size: size,
+            width: width,
+            height: height,
+            caption: caption,
+            replyTo: replyTo,
+            sentAt: Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(sender, forKey: .sender)
+        try container.encode(assetPath, forKey: .assetPath)
+        try container.encode(assetSha, forKey: .assetSha)
+        try container.encode(mime, forKey: .mime)
+        try container.encode(keyB64, forKey: .keyB64)
+        try container.encode(nonceB64, forKey: .nonceB64)
+        try container.encode(size, forKey: .size)
+        try container.encodeIfPresent(width, forKey: .width)
+        try container.encodeIfPresent(height, forKey: .height)
+        try container.encodeIfPresent(caption, forKey: .caption)
+        try container.encodeIfPresent(replyTo, forKey: .replyTo)
+        let ms = Int64((sentAt.timeIntervalSince1970 * 1000).rounded())
+        try container.encode(ms, forKey: .sentAt)
+    }
+}
+
+/// Round-trips a Date through the same Int64-ms conversion used on the
+/// wire so `==` comparisons after a seal/open cycle are reliable.
+/// Pulled out of `TextMessage` so `ImageMessage` can share it without
+/// either type owning it.
+private func canonicalDate(from date: Date) -> Date {
+    let ms = Int64((date.timeIntervalSince1970 * 1000).rounded())
+    return Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
 }
 
