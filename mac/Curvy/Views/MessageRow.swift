@@ -19,15 +19,33 @@ struct MessageRow: View {
     let isMine: Bool
     let showSenderLabel: Bool
     let replyTarget: CachedMessage?
+    let reactions: MessageReactions
+    let mySender: String
+    let reactionNamespace: Namespace.ID
     let onReply: (CachedMessage) -> Void
     let onCopy: () -> Void
+    /// Tapback resolver: caller decides whether to send or remove
+    /// based on `alreadyMine`. We pre-resolve the boolean here (rather
+    /// than re-querying the store) because the aggregated state passed
+    /// in via `reactions` is the authoritative truth at render time.
+    let onToggleReaction: (String, Bool) -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovered: Bool = false
     @State private var isHoveringReply: Bool = false
+    @State private var isHoveringReact: Bool = false
+    @State private var showingReactionPicker: Bool = false
 
     private let bubbleCorner: CGFloat = 16
     private let bubbleTailCorner: CGFloat = 4
+
+    private var mineByEmoji: Set<String> {
+        Set(reactions.groups.compactMap { $0.senders.contains(mySender) ? $0.emoji : nil })
+    }
+
+    private func isReactionMine(_ emoji: String) -> Bool {
+        mineByEmoji.contains(emoji)
+    }
 
     var body: some View {
         if message.kind == .weird {
@@ -36,22 +54,26 @@ struct MessageRow: View {
                 .padding(.vertical, 4)
                 .transition(weirdInsertionTransition)
         } else {
-            HStack(spacing: 6) {
-                if isMine {
-                    Spacer(minLength: 60)
-                    timestampText.opacity(isHovered ? 1 : 0)
-                    replyButton
-                }
+            HStack(spacing: 0) {
+                if isMine { Spacer(minLength: 60) }
 
                 bubbleColumn
                     .opacity(isOptimistic ? 0.65 : 1.0)
                     .contextMenu { contextMenuItems }
+                    .popover(isPresented: $showingReactionPicker, arrowEdge: .bottom) {
+                        ReactionPicker(
+                            targetID: String(message.id),
+                            mineByEmoji: mineByEmoji,
+                            namespace: reactionNamespace,
+                            onPick: { emoji in
+                                showingReactionPicker = false
+                                onToggleReaction(emoji, isReactionMine(emoji))
+                            }
+                        )
+                        .padding(4)
+                    }
 
-                if !isMine {
-                    replyButton
-                    timestampText.opacity(isHovered ? 1 : 0)
-                    Spacer(minLength: 60)
-                }
+                if !isMine { Spacer(minLength: 60) }
             }
             .contentShape(Rectangle())
             .onHover { hovering in
@@ -95,14 +117,17 @@ struct MessageRow: View {
             .accessibilityLabel("Sent at \(message.sentAt.formatted(date: .omitted, time: .shortened))")
     }
 
-    /// Visible whenever the row is hovered OR the button itself is
-    /// hovered. The OR is what makes the button reachable: when the
-    /// cursor crosses the 6pt gap between bubble and button, the row's
-    /// hover briefly drops (the bubble has its own gesture/menu layers
-    /// which interrupt parent hover propagation), but the button's own
-    /// onHover latches `showActions` true before visibility collapses.
+    /// Visible whenever the row is hovered OR any inline action button
+    /// is hovered. The OR is what makes the buttons reachable: when
+    /// the cursor crosses the 6pt gap between bubble and button, the
+    /// row's hover briefly drops (the bubble has its own gesture/menu
+    /// layers which interrupt parent hover propagation), but each
+    /// button's own onHover latches `showActions` true before
+    /// visibility collapses. The picker being open also pins the
+    /// buttons visible — closing the popover by clicking outside
+    /// shouldn't immediately hide the smiley that opened it.
     private var showActions: Bool {
-        isHovered || isHoveringReply
+        isHovered || isHoveringReply || isHoveringReact || showingReactionPicker
     }
 
     private var replyButton: some View {
@@ -126,6 +151,39 @@ struct MessageRow: View {
         }
         .help("Reply")
         .accessibilityLabel("Reply")
+        .allowsHitTesting(showActions)
+    }
+
+    /// Hover-revealed smiley button that opens the tapback picker.
+    /// Mirrors the geometry, hover bounce, and offset-while-hidden
+    /// trick of `replyButton` — they're siblings that read as one
+    /// affordance. The bounce-on-tap symbol effect is borrowed from
+    /// the composer's send button so reactions feel tactilely
+    /// consistent with sends.
+    private var reactButton: some View {
+        Button {
+            withAnimation(reduceMotion ? .linear(duration: 0) : .spring(response: 0.34, dampingFraction: 0.82)) {
+                showingReactionPicker.toggle()
+            }
+        } label: {
+            Image(systemName: "face.smiling")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(isHoveringReact || showingReactionPicker ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                .frame(width: 22, height: 22)
+                .background(.fill.quaternary, in: Circle())
+                .contentShape(Circle())
+                .symbolEffect(.bounce.up.byLayer, options: .speed(1.4), value: showingReactionPicker)
+        }
+        .buttonStyle(.plain)
+        .opacity(showActions ? 1 : 0)
+        .offset(x: showActions ? 0 : (isMine ? 6 : -6))
+        .scaleEffect(isHoveringReact ? 1.08 : 1.0, anchor: .center)
+        .animation(reduceMotion ? .linear(duration: 0) : .easeOut(duration: 0.12), value: isHoveringReact)
+        .onHover { hovering in
+            isHoveringReact = hovering
+        }
+        .help("React")
+        .accessibilityLabel("React")
         .allowsHitTesting(showActions)
     }
 
@@ -155,21 +213,68 @@ struct MessageRow: View {
                 replyPreview(target)
             }
 
-            if isImage {
-                imageBubble
-            } else {
-                Text(message.body)
-                    .font(.system(size: 13))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 7)
-                    .background { bubbleBackground }
-                    .foregroundStyle(Color.white)
+            HStack(spacing: 6) {
+                if isMine {
+                    timestampText.opacity(isHovered ? 1 : 0)
+                    reactButton
+                    replyButton
+                }
+
+                messageBody
+
+                if !isMine {
+                    replyButton
+                    reactButton
+                    timestampText.opacity(isHovered ? 1 : 0)
+                }
             }
         }
     }
 
-    /// Image-rendering branch. The image is the bubble: same asymmetric
+    /// The bubble itself — text or image. Reactions, when present,
+    /// live INSIDE the bubble at the bottom (Telegram-style): the
+    /// bubble's own background contains them, the bubble grows
+    /// vertically to fit, and there's no overlay/anchor geometry
+    /// fighting with bubble width or neighbors.
+    @ViewBuilder
+    private var messageBody: some View {
+        if isImage {
+            imageBubble
+        } else {
+            VStack(alignment: isMine ? .trailing : .leading, spacing: 5) {
+                Text(message.body)
+                    .font(.system(size: 13))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .foregroundStyle(Color.white)
+
+                if !reactions.groups.isEmpty {
+                    ReactionBadgeStack(
+                        reactions: reactions,
+                        mySender: mySender,
+                        namespace: reactionNamespace,
+                        isMine: isMine,
+                        onToggle: { emoji in
+                            onToggleReaction(emoji, isReactionMine(emoji))
+                        }
+                    )
+                }
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 7)
+            .background { bubbleBackground }
+        }
+    }
+
+    /// Where the reaction badge stack anchors on the bubble. Mirrors
+    /// iMessage tapback geometry: outer-top corner, opposite the
+    /// bubble tail. For outgoing bubbles (right-aligned, tail at
+    /// bottom-trailing) that's `.topLeading`; for incoming bubbles
+    /// (left-aligned, tail at bottom-leading) that's `.topTrailing`.
+    private var badgeAlignment: Alignment {
+        isMine ? .topLeading : .topTrailing
+    }
+
+/// Image-rendering branch. The image is the bubble: same asymmetric
     /// corner radius as text bubbles (clipShape), no fill behind it
     /// (the image fills the slot). Caption rides under the image as a
     /// separate text bubble, so reply parents and captions still get
@@ -203,15 +308,36 @@ struct MessageRow: View {
             .contentShape(bubbleShape)
             .onTapGesture(count: 2) { openQuickLook() }
 
-            if !message.body.isEmpty {
-                Text(message.body)
-                    .font(.system(size: 13))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 7)
-                    .background { bubbleBackground }
-                    .foregroundStyle(Color.white)
-                    .frame(maxWidth: imageDisplaySize.width, alignment: isMine ? .trailing : .leading)
+            // The caption + reactions share one tinted sub-bubble
+            // below the image. Either or both can be empty; we only
+            // render the sub-bubble when at least one is present.
+            // Reactions inside this sub-bubble follow the same
+            // Telegram-style "metadata lives in the bubble"
+            // principle as text messages.
+            if !message.body.isEmpty || !reactions.groups.isEmpty {
+                VStack(alignment: isMine ? .trailing : .leading, spacing: 5) {
+                    if !message.body.isEmpty {
+                        Text(message.body)
+                            .font(.system(size: 13))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .foregroundStyle(Color.white)
+                    }
+                    if !reactions.groups.isEmpty {
+                        ReactionBadgeStack(
+                            reactions: reactions,
+                            mySender: mySender,
+                            namespace: reactionNamespace,
+                            isMine: isMine,
+                            onToggle: { emoji in
+                                onToggleReaction(emoji, isReactionMine(emoji))
+                            }
+                        )
+                    }
+                }
+                .padding(.horizontal, 11)
+                .padding(.vertical, 7)
+                .background { bubbleBackground }
+                .frame(maxWidth: imageDisplaySize.width, alignment: isMine ? .trailing : .leading)
             }
         }
     }
@@ -372,6 +498,13 @@ struct MessageRow: View {
             onReply(message)
         } label: {
             Label("Reply", systemImage: "arrowshape.turn.up.left")
+        }
+        Button {
+            withAnimation(reduceMotion ? .linear(duration: 0) : .spring(response: 0.34, dampingFraction: 0.82)) {
+                showingReactionPicker = true
+            }
+        } label: {
+            Label("React", systemImage: "face.smiling")
         }
         Button {
             onCopy()

@@ -9,10 +9,14 @@ import Foundation
 enum MessagePayload: Codable, Sendable, Equatable {
     case text(TextMessage)
     case image(ImageMessage)
+    case reaction(ReactionMessage)
+    case reactionRemove(ReactionRemoveMessage)
 
     enum Kind: String, Codable, Sendable {
         case text
         case image
+        case reaction
+        case reactionRemove = "reaction_remove"
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -27,6 +31,10 @@ enum MessagePayload: Codable, Sendable, Equatable {
             self = .text(try TextMessage(from: decoder))
         case .image:
             self = .image(try ImageMessage(from: decoder))
+        case .reaction:
+            self = .reaction(try ReactionMessage(from: decoder))
+        case .reactionRemove:
+            self = .reactionRemove(try ReactionRemoveMessage(from: decoder))
         }
     }
 
@@ -38,6 +46,12 @@ enum MessagePayload: Codable, Sendable, Equatable {
             try message.encode(to: encoder)
         case .image(let message):
             try container.encode(Kind.image, forKey: .type)
+            try message.encode(to: encoder)
+        case .reaction(let message):
+            try container.encode(Kind.reaction, forKey: .type)
+            try message.encode(to: encoder)
+        case .reactionRemove(let message):
+            try container.encode(Kind.reactionRemove, forKey: .type)
             try message.encode(to: encoder)
         }
     }
@@ -228,6 +242,112 @@ struct ImageMessage: Codable, Sendable, Equatable {
         try container.encodeIfPresent(height, forKey: .height)
         try container.encodeIfPresent(caption, forKey: .caption)
         try container.encodeIfPresent(replyTo, forKey: .replyTo)
+        let ms = Int64((sentAt.timeIntervalSince1970 * 1000).rounded())
+        try container.encode(ms, forKey: .sentAt)
+    }
+}
+
+/// A reaction (an emoji applied by `sender` to a target message).
+///
+/// `targetID` is the GitHub comment ID of the message being reacted
+/// to, stringified — same addressing as `TextMessage.replyTo`. Using
+/// the comment ID directly means reactions don't need a synthetic ID
+/// layer and stay addressable across re-polling.
+///
+/// `sender` lives inside the ciphertext per the project's hard rule
+/// that identity must never be derivable from `comment.user.login`.
+/// CLAUDE.md's wire-format sketch omitted `sender`, but it's required
+/// for grouping ("who already reacted with X?") and for the toggle
+/// resolver — adding it follows the spirit of the identity-inside-
+/// ciphertext rule, which is load-bearing.
+struct ReactionMessage: Codable, Sendable, Equatable {
+    let sender: String
+    let targetID: String
+    let emoji: String
+    let sentAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case sender
+        case targetID = "target_id"
+        case emoji
+        case sentAt = "sent_at"
+    }
+
+    init(sender: String, targetID: String, emoji: String, sentAt: Date) {
+        self.sender = sender
+        self.targetID = targetID
+        self.emoji = emoji
+        self.sentAt = canonicalDate(from: sentAt)
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let sender = try container.decode(String.self, forKey: .sender)
+        let targetID = try container.decode(String.self, forKey: .targetID)
+        let emoji = try container.decode(String.self, forKey: .emoji)
+        let ms = try container.decode(Int64.self, forKey: .sentAt)
+        self.init(
+            sender: sender,
+            targetID: targetID,
+            emoji: emoji,
+            sentAt: Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(sender, forKey: .sender)
+        try container.encode(targetID, forKey: .targetID)
+        try container.encode(emoji, forKey: .emoji)
+        let ms = Int64((sentAt.timeIntervalSince1970 * 1000).rounded())
+        try container.encode(ms, forKey: .sentAt)
+    }
+}
+
+/// Revokes a previously-sent reaction. Carries `sentAt` so a remove
+/// can win against a same-tick re-add of the same emoji from the
+/// same sender — the render-time aggregator picks the winner by
+/// timestamp. Without `sentAt`, re-polling could permanently lose
+/// the ordering information needed to resolve toggles.
+struct ReactionRemoveMessage: Codable, Sendable, Equatable {
+    let sender: String
+    let targetID: String
+    let emoji: String
+    let sentAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case sender
+        case targetID = "target_id"
+        case emoji
+        case sentAt = "sent_at"
+    }
+
+    init(sender: String, targetID: String, emoji: String, sentAt: Date) {
+        self.sender = sender
+        self.targetID = targetID
+        self.emoji = emoji
+        self.sentAt = canonicalDate(from: sentAt)
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let sender = try container.decode(String.self, forKey: .sender)
+        let targetID = try container.decode(String.self, forKey: .targetID)
+        let emoji = try container.decode(String.self, forKey: .emoji)
+        let ms = try container.decode(Int64.self, forKey: .sentAt)
+        self.init(
+            sender: sender,
+            targetID: targetID,
+            emoji: emoji,
+            sentAt: Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(sender, forKey: .sender)
+        try container.encode(targetID, forKey: .targetID)
+        try container.encode(emoji, forKey: .emoji)
         let ms = Int64((sentAt.timeIntervalSince1970 * 1000).rounded())
         try container.encode(ms, forKey: .sentAt)
     }
