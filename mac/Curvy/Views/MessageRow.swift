@@ -171,13 +171,11 @@ struct MessageRow: View {
             } else {
                 Text(message.body)
                     .font(.system(size: 13))
-                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 11)
                     .padding(.vertical, 7)
                     .background { bubbleBackground }
-                    .foregroundStyle(isMine ? Color.white : Color.primary)
-                    .frame(maxWidth: 460, alignment: isMine ? .trailing : .leading)
+                    .foregroundStyle(Color.white)
             }
         }
     }
@@ -217,12 +215,11 @@ struct MessageRow: View {
             if !message.body.isEmpty {
                 Text(message.body)
                     .font(.system(size: 13))
-                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 11)
                     .padding(.vertical, 7)
                     .background { bubbleBackground }
-                    .foregroundStyle(isMine ? Color.white : Color.primary)
+                    .foregroundStyle(Color.white)
                     .frame(maxWidth: imageDisplaySize.width, alignment: isMine ? .trailing : .leading)
             }
         }
@@ -289,6 +286,9 @@ struct MessageRow: View {
     /// Asymmetric rounded rect: full radius on three corners, tiny
     /// radius on the corner closest to the sender's edge of the
     /// screen. Reads as a subtle "tail" pointing toward who sent it.
+    /// Mine = brand orange; others = solid black, for high contrast
+    /// on the glass window background and to lean away from the
+    /// orange-everywhere look.
     private var bubbleBackground: some View {
         UnevenRoundedRectangle(
             topLeadingRadius: bubbleCorner,
@@ -297,7 +297,7 @@ struct MessageRow: View {
             topTrailingRadius: bubbleCorner,
             style: .continuous
         )
-        .fill(isMine ? AnyShapeStyle(.tint) : AnyShapeStyle(.fill.quaternary))
+        .fill(isMine ? AnyShapeStyle(.tint) : AnyShapeStyle(Color.curvyInk))
     }
 
     private func replyPreview(_ target: CachedMessage) -> some View {
