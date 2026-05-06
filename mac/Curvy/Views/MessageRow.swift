@@ -200,6 +200,8 @@ struct MessageRow: View {
             .frame(width: imageDisplaySize.width, height: imageDisplaySize.height)
             .clipShape(bubbleShape)
             .background(bubbleShape.fill(.fill.quaternary))
+            .contentShape(bubbleShape)
+            .onTapGesture(count: 2) { openQuickLook() }
 
             if !message.body.isEmpty {
                 Text(message.body)
@@ -234,10 +236,37 @@ struct MessageRow: View {
     /// id. Until `commitPendingImage` re-links it, that's where the
     /// preview lives.
     private var pendingSidecarImage: NSImage? {
+        guard let url = pendingSidecarURL else { return nil }
+        return NSImage(contentsOfFile: url.path)
+    }
+
+    private var pendingSidecarURL: URL? {
         guard message.kind == .pendingImage else { return nil }
         let pendingFilename = "pending-\(abs(message.id)).jpg"
-        let url = BlobFetcher.cacheDirectory.appending(path: pendingFilename, directoryHint: .notDirectory)
-        return NSImage(contentsOfFile: url.path)
+        return BlobFetcher.cacheDirectory.appending(path: pendingFilename, directoryHint: .notDirectory)
+    }
+
+    /// First on-disk URL for the row's image, preferring the
+    /// confirmed cache path and falling back to the pending sidecar.
+    /// Returns nil while the bubble is still showing the placeholder.
+    private var localImageURL: URL? {
+        if let assetPath = message.assetPath {
+            let url = BlobFetcher.cacheURL(for: assetPath)
+            if FileManager.default.fileExists(atPath: url.path) { return url }
+        }
+        if let url = pendingSidecarURL, FileManager.default.fileExists(atPath: url.path) {
+            return url
+        }
+        return nil
+    }
+
+    /// Hand the cached plaintext to the system Quick Look panel. No-op
+    /// while the image is still downloading — the bubble is showing a
+    /// placeholder, so there's nothing to preview yet.
+    private func openQuickLook() {
+        guard let url = localImageURL else { return }
+        let previewURL = QuickLookManager.shared.previewURL(for: url, mime: message.imageMime)
+        QuickLookManager.shared.show(previewURL)
     }
 
     /// Bubble-sized image display size, capped at 360pt on the longer
@@ -348,6 +377,13 @@ struct MessageRow: View {
             onCopy()
         } label: {
             Label("Copy", systemImage: "document.on.document")
+        }
+        if isImage, localImageURL != nil {
+            Button {
+                openQuickLook()
+            } label: {
+                Label("Quick Look", systemImage: "eye")
+            }
         }
     }
 
