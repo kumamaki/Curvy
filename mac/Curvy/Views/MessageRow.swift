@@ -265,13 +265,13 @@ struct MessageRow: View {
         }
     }
 
-    /// Where the reaction badge stack anchors on the bubble. Mirrors
-    /// iMessage tapback geometry: outer-top corner, opposite the
-    /// bubble tail. For outgoing bubbles (right-aligned, tail at
-    /// bottom-trailing) that's `.topLeading`; for incoming bubbles
-    /// (left-aligned, tail at bottom-leading) that's `.topTrailing`.
-    private var badgeAlignment: Alignment {
-        isMine ? .topLeading : .topTrailing
+    /// Where the reaction overlay anchors inside an image bubble.
+    /// Bottom corner opposite the tail so the badges nestle into the
+    /// "quiet" corner of the image: mine → bottom-leading (tail is at
+    /// bottom-trailing), incoming → bottom-trailing (tail is at
+    /// bottom-leading).
+    private var imageReactionAlignment: Alignment {
+        isMine ? .bottomLeading : .bottomTrailing
     }
 
 /// Image-rendering branch. The image is the bubble: same asymmetric
@@ -307,21 +307,39 @@ struct MessageRow: View {
             .background(bubbleShape.fill(.fill.quaternary))
             .contentShape(bubbleShape)
             .onTapGesture(count: 2) { openQuickLook() }
+            // Reactions-only (no caption): float the badge stack inside
+            // the clipped image at the corner opposite the tail, with a
+            // glass capsule behind it so the chips stay legible against
+            // arbitrary photo content. Reactions read as part of the
+            // image container rather than a separate message bubble.
+            .overlay(alignment: imageReactionAlignment) {
+                if message.body.isEmpty && !reactions.groups.isEmpty {
+                    ReactionBadgeStack(
+                        reactions: reactions,
+                        mySender: mySender,
+                        namespace: reactionNamespace,
+                        isMine: isMine,
+                        onToggle: { emoji in
+                            onToggleReaction(emoji, isReactionMine(emoji))
+                        }
+                    )
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .glassEffect(.regular, in: .capsule)
+                    .padding(8)
+                }
+            }
 
-            // The caption + reactions share one tinted sub-bubble
-            // below the image. Either or both can be empty; we only
-            // render the sub-bubble when at least one is present.
-            // Reactions inside this sub-bubble follow the same
-            // Telegram-style "metadata lives in the bubble"
-            // principle as text messages.
-            if !message.body.isEmpty || !reactions.groups.isEmpty {
+            // Caption (with or without reactions): one tinted sub-bubble
+            // under the image, mirroring the Telegram-style "metadata
+            // lives in the bubble" principle for text messages.
+            if !message.body.isEmpty {
                 VStack(alignment: isMine ? .trailing : .leading, spacing: 5) {
-                    if !message.body.isEmpty {
-                        Text(message.body)
-                            .font(.system(size: 13))
-                            .fixedSize(horizontal: false, vertical: true)
-                            .foregroundStyle(Color.white)
-                    }
+                    Text(message.body)
+                        .font(.system(size: 13))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .foregroundStyle(Color.white)
+
                     if !reactions.groups.isEmpty {
                         ReactionBadgeStack(
                             reactions: reactions,
