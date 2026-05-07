@@ -130,7 +130,6 @@ The `justfile` is the canonical dev surface.
 just                  # list recipes
 just build            # xcodegen + xcodebuild Debug
 just run              # build, kill any running instance, launch fresh
-just develop          # run with InjectionNext hot-reload (auto-launches the watcher)
 just test             # run the test bundle
 just clean            # kill + trash all DerivedData/Curvy-*
 just mint <pat>       # generate first invite — prints new room key to stderr

@@ -2,17 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!--
-	  Release entitlements. Sandboxed, network-client only,
-	  user-selected read/write for the (future) image picker. Mirror
-	  Curvy.debug.entitlements line-for-line for the keys present in
-	  both — only differences should be sandbox-related toggles.
-	-->
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
-	<key>com.apple.security.network.client</key>
-	<true/>
 	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
 	<true/>
 </dict>
 </plist>

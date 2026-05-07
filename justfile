@@ -23,29 +23,6 @@ test:
 run: build kill
     open "$(ls -dt ~/Library/Developer/Xcode/DerivedData/Curvy-*/Build/Products/Debug/Curvy.app | head -1)"
 
-# Requires `InjectionNext.app` in /Applications — drop the build from
-# https://github.com/johnno1962/InjectionNext/releases once, then edits
-# to .swift files reload live without rebuilding.
-#
-# Run with InjectionNext hot-reload (auto-launches the watcher).
-develop: ensure-injection run
-
-[private]
-ensure-injection:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ ! -d "/Applications/InjectionNext.app" ]; then
-      echo "InjectionNext.app is not in /Applications."
-      echo "Download from https://github.com/johnno1962/InjectionNext/releases"
-      echo "and drop the .app into /Applications, then run InjectionNext.app."
-      exit 1
-    fi
-    if ! pgrep -f InjectionNext.app >/dev/null; then
-      echo "Launching InjectionNext.app (file watcher)…"
-      open -g /Applications/InjectionNext.app
-      sleep 1
-    fi
-
 [private]
 kill:
     pkill -f Curvy.app 2>/dev/null || true
