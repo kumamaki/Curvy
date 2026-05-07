@@ -20,6 +20,14 @@ struct MessageRow: View {
     let showSenderLabel: Bool
     let replyTarget: CachedMessage?
     let reactions: MessageReactions
+    /// Resolved @-mention targets for this row's body. Each match
+    /// carries both the canonical `name` (matches the wire `mentions`
+    /// array) and the `handle` actually typed in the body (first
+    /// word of `name` when unambiguous, full name otherwise).
+    /// Empty array means no highlights to render. Computed by the
+    /// parent so SwiftUI's Equatable short-circuit picks up changes
+    /// when a new sender lands in the cache.
+    let mentionResolutions: [MentionMatch]
     let mySender: String
     let reactionNamespace: Namespace.ID
     let onReply: (CachedMessage) -> Void
@@ -248,7 +256,9 @@ struct MessageRow: View {
                 }
 
                 VStack(alignment: isMine ? .trailing : .leading, spacing: 5) {
-                    Text(message.body)
+                    PilledBody(text: message.body,
+                              mentions: mentionResolutions,
+                              myName: mySender)
                         .font(.system(size: 13))
                         .fixedSize(horizontal: false, vertical: true)
                         .foregroundStyle(Color.white)
@@ -355,7 +365,9 @@ struct MessageRow: View {
             // lives in the bubble" principle for text messages.
             if !message.body.isEmpty {
                 VStack(alignment: isMine ? .trailing : .leading, spacing: 5) {
-                    Text(message.body)
+                    PilledBody(text: message.body,
+                              mentions: mentionResolutions,
+                              myName: mySender)
                         .font(.system(size: 13))
                         .fixedSize(horizontal: false, vertical: true)
                         .foregroundStyle(Color.white)
@@ -638,6 +650,177 @@ extension MessageRow: @MainActor Equatable {
             && lhs.showSenderLabel == rhs.showSenderLabel
             && lhs.mySender == rhs.mySender
             && lhs.reactions == rhs.reactions
+            && lhs.mentionResolutions == rhs.mentionResolutions
+    }
+}
+
+/// Renders a chat message body with `@<token>` spans displayed as
+/// inline white-capsule pills containing brand-orange semibold text.
+/// Plain text segments inherit the bubble's font + foreground style
+/// (white) just like before; pill segments are explicit subviews
+/// with their own background + foreground.
+///
+/// Layout uses a custom `Layout` (`PillFlowLayout`) so pills and
+/// text segments flow inline and wrap to additional lines when the
+/// available width runs out.
+private struct PilledBody: View {
+    let text: String
+    let mentions: [MentionMatch]
+    let myName: String
+
+    var body: some View {
+        let segments = makeSegments(body: text, mentions: mentions, myName: myName)
+        PillFlowLayout(horizontalSpacing: 0, lineSpacing: 1) {
+            ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
+                switch segment {
+                case .plain(let plain):
+                    Text(plain)
+                case .pill(_, let token, _):
+                    Text("@" + token)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color.curvyBrand)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(.white, in: Capsule())
+                }
+            }
+        }
+    }
+}
+
+/// One contiguous slice of body text, either plain (rendered as a
+/// `Text`) or a mention pill (rendered with capsule background).
+private enum BodySegment {
+    case plain(String)
+    case pill(name: String, token: String, isSelf: Bool)
+}
+
+/// Walk `body`, finding every `@<token>` span that resolves against
+/// `mentions`, and emit alternating plain + pill segments. Same
+/// boundary rules and longest-first preference as
+/// `MentionResolver.resolve(in:against:)`.
+private func makeSegments(
+    body: String,
+    mentions: [MentionMatch],
+    myName: String
+) -> [BodySegment] {
+    if body.isEmpty { return [] }
+    if mentions.isEmpty { return [.plain(body)] }
+
+    var candidates: [(token: String, name: String)] = []
+    for match in mentions {
+        candidates.append((token: match.name, name: match.name))
+        if match.handle != match.name {
+            candidates.append((token: match.handle, name: match.name))
+        }
+    }
+    candidates.sort { $0.token.count > $1.token.count }
+
+    var pillRanges: [(range: Range<String.Index>, name: String, token: String)] = []
+    var consumed: [Range<String.Index>] = []
+    for cand in candidates where !cand.token.isEmpty {
+        let bodyToken = "@" + cand.token
+        var cursor = body.startIndex
+        while cursor < body.endIndex,
+              let range = body.range(of: bodyToken, range: cursor..<body.endIndex)
+        {
+            if consumed.contains(where: { $0.overlaps(range) }) {
+                cursor = body.index(after: range.lowerBound)
+                continue
+            }
+            let preOK = range.lowerBound == body.startIndex
+                || body[body.index(before: range.lowerBound)].isWhitespace
+            let postOK = range.upperBound == body.endIndex
+                || body[range.upperBound].isWhitespace
+                || body[range.upperBound].isPunctuation
+            if preOK && postOK {
+                consumed.append(range)
+                pillRanges.append((range: range, name: cand.name, token: cand.token))
+                cursor = range.upperBound
+            } else {
+                cursor = body.index(after: range.lowerBound)
+            }
+        }
+    }
+
+    pillRanges.sort { $0.range.lowerBound < $1.range.lowerBound }
+
+    var segments: [BodySegment] = []
+    var cursor = body.startIndex
+    for pill in pillRanges {
+        if cursor < pill.range.lowerBound {
+            segments.append(.plain(String(body[cursor..<pill.range.lowerBound])))
+        }
+        segments.append(.pill(
+            name: pill.name,
+            token: pill.token,
+            isSelf: pill.name == myName
+        ))
+        cursor = pill.range.upperBound
+    }
+    if cursor < body.endIndex {
+        segments.append(.plain(String(body[cursor..<body.endIndex])))
+    }
+    return segments
+}
+
+/// Wrapping inline-flow layout. Each subview takes its natural size
+/// and gets placed left-to-right; when the next subview won't fit on
+/// the current line it wraps to the next. Keeps `lineHeight` per
+/// line so pills (slightly taller than plain text) don't push earlier
+/// segments downward — alignment is to the line top, baseline drift
+/// is acceptable for a chat bubble.
+private struct PillFlowLayout: Layout {
+    var horizontalSpacing: CGFloat = 0
+    var lineSpacing: CGFloat = 0
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        return computeLayout(maxWidth: maxWidth, subviews: subviews).totalSize
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        let layout = computeLayout(maxWidth: bounds.width, subviews: subviews)
+        for (index, frame) in layout.frames.enumerated() {
+            subviews[index].place(
+                at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                anchor: .topLeading,
+                proposal: ProposedViewSize(width: frame.width, height: frame.height)
+            )
+        }
+    }
+
+    private func computeLayout(
+        maxWidth: CGFloat,
+        subviews: Subviews
+    ) -> (frames: [CGRect], totalSize: CGSize) {
+        var frames: [CGRect] = []
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var lineHeight: CGFloat = 0
+        var maxRight: CGFloat = 0
+        for sub in subviews {
+            let size = sub.sizeThatFits(.unspecified)
+            if x + size.width > maxWidth && x > 0 {
+                y += lineHeight + lineSpacing
+                x = 0
+                lineHeight = 0
+            }
+            frames.append(CGRect(x: x, y: y, width: size.width, height: size.height))
+            x += size.width + horizontalSpacing
+            lineHeight = max(lineHeight, size.height)
+            maxRight = max(maxRight, x - horizontalSpacing)
+        }
+        return (frames, CGSize(width: maxRight, height: y + lineHeight))
     }
 }
 

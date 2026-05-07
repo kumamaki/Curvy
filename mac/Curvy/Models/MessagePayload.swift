@@ -55,6 +55,19 @@ enum MessagePayload: Codable, Sendable, Equatable {
             try message.encode(to: encoder)
         }
     }
+
+    /// The display name of whoever produced this payload, regardless
+    /// of kind. Every concrete message type carries `sender` (it's the
+    /// load-bearing identity field that lives inside the ciphertext),
+    /// so this lookup is total — no optionals, no fallbacks.
+    var sender: String {
+        switch self {
+        case .text(let m): return m.sender
+        case .image(let m): return m.sender
+        case .reaction(let m): return m.sender
+        case .reactionRemove(let m): return m.sender
+        }
+    }
 }
 
 /// A plain text message inside an encrypted envelope.
@@ -73,19 +86,27 @@ struct TextMessage: Codable, Sendable, Equatable {
     let sender: String
     let body: String
     let replyTo: String?
+    /// Display names of the people this message structurally @-mentions,
+    /// resolved at send time. The body still contains the literal
+    /// `@DisplayName` tokens for rendering — this array is the source of
+    /// truth for "did this @ me?" checks. Optional + decodeIfPresent so
+    /// pre-mention senders and pre-mention messages decode cleanly.
+    let mentions: [String]?
     let sentAt: Date
 
     enum CodingKeys: String, CodingKey {
         case sender
         case body
         case replyTo = "reply_to"
+        case mentions
         case sentAt = "sent_at"
     }
 
-    init(sender: String, body: String, replyTo: String?, sentAt: Date) {
+    init(sender: String, body: String, replyTo: String?, mentions: [String]? = nil, sentAt: Date) {
         self.sender = sender
         self.body = body
         self.replyTo = replyTo
+        self.mentions = mentions
         // sentAt rides the wire as an Int64 millisecond count since
         // 1970 (see encode/decode). We picked Int64-ms over ISO-8601
         // string after slice 1 hit floating-point ε round-trip drift:
@@ -102,11 +123,13 @@ struct TextMessage: Codable, Sendable, Equatable {
         let sender = try container.decode(String.self, forKey: .sender)
         let body = try container.decode(String.self, forKey: .body)
         let replyTo = try container.decodeIfPresent(String.self, forKey: .replyTo)
+        let mentions = try container.decodeIfPresent([String].self, forKey: .mentions)
         let ms = try container.decode(Int64.self, forKey: .sentAt)
         self.init(
             sender: sender,
             body: body,
             replyTo: replyTo,
+            mentions: mentions,
             sentAt: Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
         )
     }
@@ -116,6 +139,7 @@ struct TextMessage: Codable, Sendable, Equatable {
         try container.encode(sender, forKey: .sender)
         try container.encode(body, forKey: .body)
         try container.encodeIfPresent(replyTo, forKey: .replyTo)
+        try container.encodeIfPresent(mentions, forKey: .mentions)
         let ms = Int64((sentAt.timeIntervalSince1970 * 1000).rounded())
         try container.encode(ms, forKey: .sentAt)
     }

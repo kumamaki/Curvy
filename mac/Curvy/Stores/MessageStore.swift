@@ -172,6 +172,20 @@ final class MessageStore {
         return (try? modelContext.fetch(descriptor))?.first?.createdAt
     }
 
+    /// Distinct sender names currently in the cache, plus the local
+    /// user. Used by the body-text mention resolver on send and by the
+    /// cold-start fallback in `announceIfNeeded`. Cheap — the cache
+    /// holds at most a few thousand rows over the lifetime of a
+    /// 4-person room.
+    private func currentKnownSenders() -> [String] {
+        let descriptor = FetchDescriptor<CachedMessage>()
+        let all = (try? modelContext.fetch(descriptor)) ?? []
+        var set = Set(all.map(\.sender))
+        set.insert(preferences.displayName)
+        set.remove("")
+        return set.sorted()
+    }
+
     // MARK: - Send (text)
 
     /// Seal `text` against the room key, post it as a comment on the
@@ -188,10 +202,21 @@ final class MessageStore {
             throw SendError.notStarted
         }
         let now = Date()
+        // Body is the source of truth for mention targets — we resolve
+        // `@<token>` (either the handle "Mehdi" or the full name
+        // "Mehdi Khaledi") against the live cache of known senders at
+        // send time. The wire carries canonical full names; `.map(\.name)`
+        // strips the handle field used only by the renderer.
+        let matches = MentionResolver.resolve(
+            in: text,
+            against: currentKnownSenders()
+        )
+        let mentions: [String]? = matches.isEmpty ? nil : matches.map(\.name)
         let payload: MessagePayload = .text(TextMessage(
             sender: preferences.displayName,
             body: text,
             replyTo: replyTo,
+            mentions: mentions,
             sentAt: now
         ))
 
@@ -204,6 +229,7 @@ final class MessageStore {
             sender: preferences.displayName,
             body: text,
             replyTo: replyTo,
+            mentions: mentions,
             sentAt: now,
             createdAt: now,
             updatedAt: now
@@ -503,7 +529,8 @@ final class MessageStore {
                     commentID: comment.id,
                     createdAt: comment.createdAt,
                     sender: text.sender,
-                    preview: text.body
+                    preview: text.body,
+                    mentions: text.mentions
                 )
             case .image(let image):
                 upsertImage(comment: comment, image: image, invite: invite, key: key)
@@ -538,7 +565,8 @@ final class MessageStore {
         commentID: Int,
         createdAt: Date,
         sender: String,
-        preview: String
+        preview: String,
+        mentions: [String]? = nil
     ) {
         if sender == preferences.displayName { return }
         if let watermark = preferences.lastReadCreatedAt, createdAt <= watermark {
@@ -548,7 +576,23 @@ final class MessageStore {
             let watermark = preferences.lastReadCreatedAt ?? .distantPast
             preferences.lastReadCreatedAt = max(watermark, createdAt)
         } else {
-            notifier.post(String(commentID), sender, preview)
+            let me = preferences.displayName
+            // Cold-start fallback: if the sender's cache was empty
+            // when they typed `@MyName`, the wire shipped `mentions:
+            // nil`. Re-resolve against this client's known senders so
+            // the notification path stays symmetric with the receiver-
+            // side body highlight.
+            let mentionsMe: Bool = {
+                if let m = mentions { return m.contains(me) }
+                return MentionResolver
+                    .resolve(in: preview, against: currentKnownSenders())
+                    .contains { $0.name == me }
+            }()
+            if mentionsMe {
+                notifier.postMention(String(commentID), sender, preview)
+            } else {
+                notifier.post(String(commentID), sender, preview)
+            }
         }
         refreshUnread()
     }
@@ -575,6 +619,7 @@ final class MessageStore {
             existing.sender = text.sender
             existing.body = text.body
             existing.replyTo = text.replyTo
+            existing.mentions = text.mentions
             existing.sentAt = text.sentAt
             existing.updatedAt = comment.updatedAt
         } else {
@@ -584,6 +629,7 @@ final class MessageStore {
                 sender: text.sender,
                 body: text.body,
                 replyTo: text.replyTo,
+                mentions: text.mentions,
                 sentAt: text.sentAt,
                 createdAt: comment.createdAt,
                 updatedAt: comment.updatedAt
