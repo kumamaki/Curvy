@@ -18,6 +18,11 @@ mac/Curvy.xcodeproj/
 mac/Curvy/Resources/Info.plist
 mac/Curvy/Resources/Curvy.entitlements
 
+# sourcekit-lsp ↔ Xcode bridge config — per-machine, points at local
+# DerivedData paths. Regenerate with `xcode-build-server config
+# -project mac/Curvy.xcodeproj -scheme Curvy`.
+buildServer.json
+
 # Build output
 mac/build/
 mac/dist/

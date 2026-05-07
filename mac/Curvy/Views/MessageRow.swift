@@ -35,6 +35,11 @@ struct MessageRow: View {
     @State private var isHoveringReply: Bool = false
     @State private var isHoveringReact: Bool = false
     @State private var showingReactionPicker: Bool = false
+    /// Decoded NSImage cache. Loaded once via `.task(id:)` when the
+    /// underlying asset (or its on-disk timestamp) changes — never on
+    /// scroll-induced body re-eval. Without this, every parent body
+    /// refresh re-allocates an NSImage from disk per visible row.
+    @State private var cachedImage: NSImage?
 
     private let bubbleCorner: CGFloat = 16
     private let bubbleTailCorner: CGFloat = 4
@@ -209,10 +214,6 @@ struct MessageRow: View {
                     .padding(.bottom, 1)
             }
 
-            if let target = replyTarget {
-                replyPreview(target)
-            }
-
             HStack(spacing: 6) {
                 if isMine {
                     timestampText.opacity(isHovered ? 1 : 0)
@@ -241,37 +242,45 @@ struct MessageRow: View {
         if isImage {
             imageBubble
         } else {
-            VStack(alignment: isMine ? .trailing : .leading, spacing: 5) {
-                Text(message.body)
-                    .font(.system(size: 13))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .foregroundStyle(Color.white)
-
-                if !reactions.groups.isEmpty {
-                    ReactionBadgeStack(
-                        reactions: reactions,
-                        mySender: mySender,
-                        namespace: reactionNamespace,
-                        isMine: isMine,
-                        onToggle: { emoji in
-                            onToggleReaction(emoji, isReactionMine(emoji))
-                        }
-                    )
+            VStack(alignment: .leading, spacing: 0) {
+                if let target = replyTarget {
+                    inlineReplyHeader(target)
                 }
+
+                VStack(alignment: isMine ? .trailing : .leading, spacing: 5) {
+                    Text(message.body)
+                        .font(.system(size: 13))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .foregroundStyle(Color.white)
+
+                    if !reactions.groups.isEmpty {
+                        ReactionBadgeStack(
+                            reactions: reactions,
+                            mySender: mySender,
+                            namespace: reactionNamespace,
+                            isMine: isMine,
+                            onToggle: { emoji in
+                                onToggleReaction(emoji, isReactionMine(emoji))
+                            }
+                        )
+                    }
+                }
+                .padding(.horizontal, 11)
+                .padding(.vertical, 7)
             }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 7)
             .background { bubbleBackground }
+            .clipShape(bubbleShape)
         }
     }
 
     /// Where the reaction overlay anchors inside an image bubble.
-    /// Bottom corner opposite the tail so the badges nestle into the
-    /// "quiet" corner of the image: mine → bottom-leading (tail is at
-    /// bottom-trailing), incoming → bottom-trailing (tail is at
-    /// bottom-leading).
+    /// Same side as the tail to match text bubbles, where reactions
+    /// inside the inner VStack align to the same edge as the sender:
+    /// mine → bottom-trailing, incoming → bottom-leading. Keeps the
+    /// badges' horizontal position consistent across image, text, and
+    /// caption rows.
     private var imageReactionAlignment: Alignment {
-        isMine ? .bottomLeading : .bottomTrailing
+        isMine ? .bottomTrailing : .bottomLeading
     }
 
 /// Image-rendering branch. The image is the bubble: same asymmetric
@@ -288,25 +297,36 @@ struct MessageRow: View {
     @ViewBuilder
     private var imageBubble: some View {
         VStack(alignment: isMine ? .trailing : .leading, spacing: 4) {
-            ZStack {
-                if let nsImage = loadedImage {
-                    Image(nsImage: nsImage)
-                        .resizable()
-                        .scaledToFill()
-                } else {
-                    Rectangle()
-                        .fill(.fill.quaternary)
-                        .overlay {
-                            ProgressView()
-                                .controlSize(.small)
-                        }
+            VStack(alignment: .leading, spacing: 0) {
+                if let target = replyTarget {
+                    inlineReplyHeader(target)
+                        .frame(width: imageDisplaySize.width, alignment: .leading)
+                        .background(isMine ? AnyShapeStyle(.tint) : AnyShapeStyle(Color.curvyInk))
                 }
+
+                ZStack {
+                    if let nsImage = cachedImage {
+                        Image(nsImage: nsImage)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        Rectangle()
+                            .fill(.fill.quaternary)
+                            .overlay {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                    }
+                }
+                .frame(width: imageDisplaySize.width, height: imageDisplaySize.height)
+                .background(.fill.quaternary)
             }
-            .frame(width: imageDisplaySize.width, height: imageDisplaySize.height)
             .clipShape(bubbleShape)
-            .background(bubbleShape.fill(.fill.quaternary))
             .contentShape(bubbleShape)
             .onTapGesture(count: 2) { openQuickLook() }
+            .task(id: imageCacheToken) {
+                cachedImage = localImageURL.flatMap { NSImage(contentsOfFile: $0.path) }
+            }
             // Reactions-only (no caption): float the badge stack inside
             // the clipped image at the corner opposite the tail, with a
             // glass capsule behind it so the chips stay legible against
@@ -360,30 +380,25 @@ struct MessageRow: View {
         }
     }
 
-    /// Best available local image: real file from the cache for
-    /// `.image`, the pending sidecar for `.pendingImage`. Returns nil
-    /// when nothing's on disk — caller renders the placeholder.
-    private var loadedImage: NSImage? {
-        guard let assetPath = message.assetPath else {
-            // Pending row before its sidecar landed — fall through to placeholder.
-            return pendingSidecarImage
+    /// Cache key for the on-disk image. Changes when the asset path
+    /// rotates (pending → committed) or when BlobFetcher writes the
+    /// decrypted bytes and bumps `imageCachedAt`. Stable across scroll
+    /// re-renders, so `.task(id:)` won't re-fire purely from scroll.
+    private var imageCacheToken: String {
+        if message.kind == .pendingImage {
+            return "pending:\(message.id)"
         }
-        let url = BlobFetcher.cacheURL(for: assetPath)
-        if FileManager.default.fileExists(atPath: url.path) {
-            return NSImage(contentsOfFile: url.path)
+        if let path = message.assetPath {
+            let stamp = message.imageCachedAt?.timeIntervalSince1970 ?? 0
+            return "asset:\(path):\(stamp)"
         }
-        return pendingSidecarImage
+        return "missing:\(message.id)"
     }
 
     /// During an optimistic image send, the JPEG bytes get stashed at
     /// `pending-<id>.jpg` in the cache dir under the negative pending
     /// id. Until `commitPendingImage` re-links it, that's where the
     /// preview lives.
-    private var pendingSidecarImage: NSImage? {
-        guard let url = pendingSidecarURL else { return nil }
-        return NSImage(contentsOfFile: url.path)
-    }
-
     private var pendingSidecarURL: URL? {
         guard message.kind == .pendingImage else { return nil }
         let pendingFilename = "pending-\(abs(message.id)).jpg"
@@ -462,26 +477,75 @@ struct MessageRow: View {
         .fill(isMine ? AnyShapeStyle(.tint) : AnyShapeStyle(Color.curvyInk))
     }
 
-    private func replyPreview(_ target: CachedMessage) -> some View {
-        HStack(spacing: 6) {
-            Capsule()
-                .fill(.tint)
-                .frame(width: 2)
+    /// Reply quote rendered as a "header section" inside the bubble's
+    /// own clipped surface, Telegram/WhatsApp-style. Sits flush at the
+    /// top of the bubble; a leading-edge stripe + a soft tint overlay
+    /// differentiate it from the body without breaking the bubble's
+    /// continuity.
+    ///
+    /// Color choice: foreground colors are pinned to explicit white
+    /// opacities (not `.secondary`) because `.secondary` resolves
+    /// against system surfaces, not against our custom orange/ink
+    /// bubble fills — on `curvyInk` it desaturates to near-charcoal.
+    /// Outgoing uses a white-tint overlay (slightly paler orange band).
+    /// Incoming uses the brand tint at low opacity so the band reads
+    /// as a *warmer* slice of the same dark surface, picking up the
+    /// stripe color instead of stamping a gray rectangle on top.
+    /// Image originals get a small `photo` glyph and a "Photo"
+    /// fallback when the parent had no caption.
+    private func inlineReplyHeader(_ target: CachedMessage) -> some View {
+        let stripeStyle: AnyShapeStyle = isMine
+            ? AnyShapeStyle(Color.white.opacity(0.55))
+            : AnyShapeStyle(Color.curvyBrand.opacity(0.6))
+        let senderStyle: AnyShapeStyle = isMine
+            ? AnyShapeStyle(Color.white)
+            : AnyShapeStyle(.tint)
+        let bodyStyle: AnyShapeStyle = isMine
+            ? AnyShapeStyle(Color.white.opacity(0.72))
+            : AnyShapeStyle(Color.white.opacity(0.62))
+        let overlayStyle: AnyShapeStyle = isMine
+            ? AnyShapeStyle(Color.white.opacity(0.18))
+            : AnyShapeStyle(Color.curvyBrand.opacity(0.14))
+        let isImageTarget = target.kind == .image || target.kind == .pendingImage
+        let bodyText: String = {
+            if target.kind == .weird { return "weird message" }
+            if isImageTarget && target.body.isEmpty { return "Photo" }
+            return target.body
+        }()
+
+        return HStack(spacing: 8) {
+            // Fixed stripe height (rather than stretch-to-fill) so the
+            // rule reads as a quote-mark accent next to the text, not
+            // a full-bleed sidebar. Sized to roughly hug the two-line
+            // text block — the HStack's `.center` alignment pins it
+            // vertically against the sender + body pair.
+            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                .fill(stripeStyle)
+                .frame(width: 2.5, height: 24)
+
             VStack(alignment: .leading, spacing: 1) {
                 Text(target.sender.isEmpty ? "—" : target.sender)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.tint)
-                Text(target.kind == .weird ? "weird message" : target.body)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(senderStyle)
+
+                HStack(spacing: 4) {
+                    if isImageTarget {
+                        Image(systemName: "photo")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(bodyStyle)
+                    }
+                    Text(bodyText)
+                        .font(.system(size: 11))
+                        .foregroundStyle(bodyStyle)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(.fill.quaternary, in: .rect(cornerRadius: 8))
-        .frame(maxWidth: 280, alignment: isMine ? .trailing : .leading)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .frame(maxWidth: 280, alignment: .leading)
+        .background(overlayStyle)
     }
 
     private var weirdBubble: some View {
@@ -538,5 +602,42 @@ struct MessageRow: View {
         }
     }
 
+}
+
+/// View-level `Equatable` for SwiftUI's `.equatable()` short-circuit:
+/// when ChatView re-evaluates its body during scroll (driven by the
+/// `.scrollPosition` binding writeback), this lets SwiftUI skip every
+/// visible row's body unless one of its rendering inputs actually
+/// changed. Closures (`onReply`, `onCopy`, `onToggleReaction`) and the
+/// `Namespace.ID` are intentionally excluded — closures are recreated
+/// every render but functionally identical, and the namespace is
+/// constant for ChatView's lifetime.
+///
+/// CachedMessage is a SwiftData `@Model` *class*, so we compare its
+/// rendering-relevant scalar fields, not `===` — the same instance can
+/// have mutated fields (e.g. `imageCachedAt` flipping nil → Date when
+/// BlobFetcher writes the decrypted bytes) and we must not skip the
+/// re-render in that case.
+extension MessageRow: @MainActor Equatable {
+    static func == (lhs: MessageRow, rhs: MessageRow) -> Bool {
+        lhs.message.persistentModelID == rhs.message.persistentModelID
+            && lhs.message.id == rhs.message.id
+            && lhs.message.body == rhs.message.body
+            && lhs.message.kind == rhs.message.kind
+            && lhs.message.sender == rhs.message.sender
+            && lhs.message.sentAt == rhs.message.sentAt
+            && lhs.message.imageCachedAt == rhs.message.imageCachedAt
+            && lhs.message.assetPath == rhs.message.assetPath
+            && lhs.message.imageWidth == rhs.message.imageWidth
+            && lhs.message.imageHeight == rhs.message.imageHeight
+            && lhs.replyTarget?.persistentModelID == rhs.replyTarget?.persistentModelID
+            && lhs.replyTarget?.body == rhs.replyTarget?.body
+            && lhs.replyTarget?.sender == rhs.replyTarget?.sender
+            && lhs.replyTarget?.kind == rhs.replyTarget?.kind
+            && lhs.isMine == rhs.isMine
+            && lhs.showSenderLabel == rhs.showSenderLabel
+            && lhs.mySender == rhs.mySender
+            && lhs.reactions == rhs.reactions
+    }
 }
 
