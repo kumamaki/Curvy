@@ -36,16 +36,39 @@ struct MessageComposer: View {
     @Binding var imageDraft: ImagePipeline.Prepared?
     @Binding var replyingTo: CachedMessage?
     let shakeTrigger: Int
+    /// Snapshot of every distinct sender currently in the chat cache,
+    /// owned by `ChatView`. Used to filter the autocomplete picker.
+    /// We don't track picker selections separately — the body itself
+    /// is the source of truth for mentions, resolved at send time
+    /// inside `MessageStore.send`.
+    let knownSenders: [String]
     let onSend: () -> Void
     let onPickError: (any Error) -> Void
     let onLoadURL: (URL) -> Void
     let onLoadProviders: ([NSItemProvider]) -> Void
 
-    @FocusState private var focused: Bool
+    @Environment(MessageStore.self) private var store
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var sendPulse: Bool = false
-    @State private var didFocusOnce: Bool = false
     @State private var showFileImporter: Bool = false
+
+    // MARK: - Mention state
+    /// Height of the autosizing NSTextView. Updated by the wrapper on
+    /// each layout pass; consumed by `.frame(height:)` so the field
+    /// grows with content up to `maxLines`.
+    @State private var draftHeight: CGFloat = 28
+    /// Substring after `@` and before the caret when the caret is
+    /// inside an active mention token. `nil` means no picker is open.
+    @State private var mentionQuery: String? = nil
+    /// Highlighted row in the picker. Reset to 0 whenever the active
+    /// query changes (so a fresh `@` always selects the top result).
+    @State private var pickerSelectedIndex: Int = 0
+    /// Pointer the wrapper installs a "commit @-token at caret"
+    /// closure on. The picker's onSelect calls `mentionController
+    /// .commit(name)` and the wrapper mutates the live NSTextView
+    /// in place — avoids re-deriving the token range from the
+    /// SwiftUI string, which is a class of off-by-one bugs.
+    @State private var mentionController = MentionTextController()
 
     private var trimmed: String {
         draftText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -90,14 +113,6 @@ struct MessageComposer: View {
             reduceMotion ? .linear(duration: 0) : .linear(duration: 0.4),
             value: shakeTrigger
         )
-        .onAppear {
-            // Fire once per process — `.onAppear` re-fires on window
-            // restore from minimize, which would steal focus from
-            // wherever the user is typing.
-            guard !didFocusOnce else { return }
-            didFocusOnce = true
-            focused = true
-        }
         .fileImporter(
             isPresented: $showFileImporter,
             allowedContentTypes: [.image],
@@ -127,43 +142,136 @@ struct MessageComposer: View {
     }
 
     private var composerRow: some View {
-        HStack(alignment: .center, spacing: 10) {
+        HStack(alignment: .bottom, spacing: 10) {
             attachButton
-            TextField("Message", text: $draftText, axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(.system(size: 14))
-                .lineLimit(1...6)
-                .focused($focused)
-                .onSubmit {
-                    sendPulse.toggle()
-                    onSend()
-                }
-                // SwiftUI's `TextField(axis: .vertical)` + `.onSubmit`
-                // treats every Return press as a submission, even with
-                // Shift held — so Shift+Return would otherwise send
-                // instead of inserting a newline. Intercept here:
-                // append `\n` and swallow the event when shift is
-                // held, fall through to `.onSubmit` otherwise.
-                .onKeyPress(.return, phases: .down) { press in
-                    guard press.modifiers.contains(.shift) else {
-                        return .ignored
-                    }
-                    draftText.append("\n")
-                    return .handled
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 9)
-                .background(.fill.tertiary, in: .rect(cornerRadius: 18))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .strokeBorder(.separator.opacity(0.4), lineWidth: 0.5)
-                }
-
+                .padding(.bottom, 4)
+            mentionAwareInput
             sendButton
+                .padding(.bottom, 2)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .animation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.18), value: draftText)
+    }
+
+    /// The autosizing NSTextView wrapper plus the floating mention
+    /// picker overlay. Picker positions itself above the input via a
+    /// negative-y offset on an `.overlay(alignment: .topLeading)` —
+    /// estimated height keeps it from clipping when the picker has
+    /// fewer rows than the cap (1 or 2 names is common).
+    private var mentionAwareInput: some View {
+        MentionTextView(
+            text: $draftText,
+            height: $draftHeight,
+            activeQuery: $mentionQuery,
+            pickerActive: !filteredSuggestions.isEmpty,
+            placeholder: "Message",
+            font: .systemFont(ofSize: 14),
+            maxLines: 6,
+            controller: mentionController,
+            onSend: handleReturnSend,
+            onPickerNavigate: navigatePicker,
+            onPickerCommit: commitPickerSelection,
+            onPickerDismiss: dismissPicker
+        )
+        .frame(height: draftHeight)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(.fill.tertiary, in: .rect(cornerRadius: 18))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(.separator.opacity(0.4), lineWidth: 0.5)
+        }
+        .overlay(alignment: .topLeading) {
+            if !filteredSuggestions.isEmpty {
+                MentionPicker(
+                    suggestions: filteredSuggestions,
+                    selectedIndex: pickerSelectedIndex,
+                    onSelect: commitMention,
+                    onHover: { pickerSelectedIndex = $0 }
+                )
+                .fixedSize()
+                .offset(y: -estimatedPickerHeight - 6)
+                .transition(
+                    reduceMotion
+                        ? .opacity
+                        : .scale(scale: 0.96, anchor: .bottomLeading).combined(with: .opacity)
+                )
+                .zIndex(1)
+            }
+        }
+        .onChange(of: mentionQuery) { _, _ in
+            // Fresh query → reset highlight to the top result so the
+            // first arrow keypress moves predictably from index 0.
+            pickerSelectedIndex = 0
+        }
+        .onChange(of: filteredSuggestions) { _, suggestions in
+            // Senders snapshot changed under us — clamp selection so
+            // it doesn't index out of range.
+            if pickerSelectedIndex >= suggestions.count {
+                pickerSelectedIndex = max(0, suggestions.count - 1)
+            }
+        }
+    }
+
+    // MARK: - Mention helpers
+
+    /// Suggestions are handles ("Mehdi" rather than "Mehdi Khaledi")
+    /// when a sender's first word is unique among the room. Picker
+    /// rows display these handles directly; committing one inserts
+    /// `@<handle> ` at the caret. The send-time resolver then maps
+    /// the body's `@<handle>` back to the canonical full name for
+    /// the wire `mentions` array.
+    private var filteredSuggestions: [String] {
+        guard let query = mentionQuery else { return [] }
+        let me = store.displayName
+        let lowered = query.lowercased()
+        let handleMap = MentionResolver.handles(for: knownSenders)
+        return knownSenders
+            .filter { $0 != me }
+            .compactMap { handleMap[$0] }
+            .filter { $0.lowercased().hasPrefix(lowered) }
+    }
+
+    private var estimatedPickerHeight: CGFloat {
+        // Each row is ~28pt content + padding; container has 8pt
+        // padding top/bottom. Used to offset the floating overlay so
+        // it sits above the input without overlapping it.
+        CGFloat(filteredSuggestions.count) * 30 + 12
+    }
+
+    private func handleReturnSend() {
+        sendPulse.toggle()
+        onSend()
+    }
+
+    private func navigatePicker(_ delta: Int) {
+        let count = filteredSuggestions.count
+        guard count > 0 else { return }
+        let next = (pickerSelectedIndex + delta + count) % count
+        pickerSelectedIndex = next
+    }
+
+    private func commitPickerSelection() {
+        let suggestions = filteredSuggestions
+        guard !suggestions.isEmpty else { return }
+        let idx = max(0, min(pickerSelectedIndex, suggestions.count - 1))
+        commitMention(suggestions[idx])
+    }
+
+    private func commitMention(_ name: String) {
+        mentionController.commit(name)
+        pickerSelectedIndex = 0
+        // The wrapper clears `mentionQuery` itself after the textual
+        // replacement; no need to do it here.
+    }
+
+    private func dismissPicker() {
+        // Don't mutate the buffer — Esc just hides the picker. The
+        // user can keep typing and the picker re-appears once the
+        // query becomes ambiguous again.
+        mentionQuery = nil
+        pickerSelectedIndex = 0
     }
 
     private var attachButton: some View {

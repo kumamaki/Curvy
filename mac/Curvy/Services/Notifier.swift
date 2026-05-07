@@ -26,6 +26,15 @@ struct Notifier {
     /// instead of stacking duplicates.
     var post: @MainActor (_ id: String, _ title: String, _ body: String) -> Void
 
+    /// Schedule a notification for a message that explicitly @-mentions
+    /// the local user. Same shape as `post`, but prefixes the title
+    /// with `[@you]` so a quick glance at Notification Center makes
+    /// pings stand out from generic chatter. Stays within Curvy's
+    /// existing entitlements — `interruptionLevel` is left at the
+    /// default `.active`, no `.timeSensitive` (which would require
+    /// `com.apple.developer.usernotifications.time-sensitive`).
+    var postMention: @MainActor (_ id: String, _ title: String, _ body: String) -> Void
+
     /// Dismiss every Curvy notification still sitting in Notification
     /// Center. Called on `markRead()` so the user-visible state
     /// matches the in-app "everything is read" state.
@@ -61,6 +70,18 @@ extension Notifier {
                     }
                 }
             },
+            postMention: { id, title, body in
+                let content = UNMutableNotificationContent()
+                content.title = "[@you] " + title
+                content.body = body
+                content.sound = .default
+                let request = UNNotificationRequest(identifier: id, content: content, trigger: nil)
+                center.add(request) { error in
+                    if let error {
+                        logger.warning("mention notification post failed: \(error.localizedDescription, privacy: .public)")
+                    }
+                }
+            },
             clearDelivered: {
                 center.removeAllDeliveredNotifications()
             },
@@ -73,6 +94,7 @@ extension Notifier {
     static let noop = Notifier(
         requestAuthorization: { false },
         post: { _, _, _ in },
+        postMention: { _, _, _ in },
         clearDelivered: { },
         setBadge: { _ in }
     )

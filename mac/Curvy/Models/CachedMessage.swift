@@ -39,6 +39,11 @@ final class CachedMessage {
     var sender: String
     var body: String
     var replyTo: String?
+    /// Display names this message @-mentions, mirrored from
+    /// `TextMessage.mentions`. Optional — pre-mention rows in the cache
+    /// stay nil and round-trip through the SwiftData lightweight
+    /// migration without manual schema work.
+    var mentions: [String]?
     var sentAt: Date
     var createdAt: Date
     var updatedAt: Date
@@ -96,6 +101,7 @@ final class CachedMessage {
          sender: String,
          body: String,
          replyTo: String?,
+         mentions: [String]? = nil,
          sentAt: Date,
          createdAt: Date,
          updatedAt: Date,
@@ -113,6 +119,7 @@ final class CachedMessage {
         self.sender = sender
         self.body = body
         self.replyTo = replyTo
+        self.mentions = mentions
         self.sentAt = sentAt
         self.createdAt = createdAt
         self.updatedAt = updatedAt

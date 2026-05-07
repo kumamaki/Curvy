@@ -1,5 +1,4 @@
 import AppKit
-import Inject
 import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
@@ -32,9 +31,9 @@ struct ChatView: View {
     // viewport with lazy content until the user scrolls.
     @State private var scrollPosition = ScrollPosition(idType: PersistentIdentifier.self, edge: .bottom)
     @State private var isPinnedToBottom: Bool = true
+    @State private var didInitialScroll: Bool = false
     @State private var shakeTrigger: Int = 0
     @State private var isDropTargeted: Bool = false
-    @ObserveInjection private var inject
 
     /// Shared namespace for the reaction "stick" animation. Picker
     /// emojis publish a matched-geometry source keyed by
@@ -53,6 +52,7 @@ struct ChatView: View {
                     imageDraft: $imageDraft,
                     replyingTo: $replyingTo,
                     shakeTrigger: shakeTrigger,
+                    knownSenders: knownSenders,
                     onSend: send,
                     onPickError: { _ in shakeTrigger += 1 },
                     onLoadURL: preparePicked(url:),
@@ -107,7 +107,6 @@ struct ChatView: View {
                     store.markRead()
                 }
             }
-            .enableInjection()
     }
 
     /// Window-spanning drop affordance. Shown when the user is
@@ -166,8 +165,29 @@ struct ChatView: View {
     /// `id`) keeps view identity stable when `MessageStore.send`
     /// updates a pending row's `id` in place — no view re-creation,
     /// no flicker.
+    /// Distinct sender names across the live message list, plus the
+    /// local user. Used as the input set for the body-text mention
+    /// resolver — both for receiver-side highlight (here) and as a
+    /// snapshot the composer reads to filter the autocomplete picker.
+    /// Reading `messages` registers the SwiftData dependency, so any
+    /// new sender lights up as soon as their first message lands in
+    /// the cache.
+    private var knownSenders: [String] {
+        var set = Set(messages.map(\.sender))
+        set.insert(store.displayName)
+        set.remove("")
+        return set.sorted()
+    }
+
     private var rows: [RowItem] {
         let myName = store.displayName
+        let senders = knownSenders
+        // Handle map is the same for every row in this snapshot, so
+        // we derive it once and lift the per-row work to a dictionary
+        // lookup. Authoritative `msg.mentions` (full names from the
+        // wire) gets paired with handles via this same map so the
+        // renderer can highlight whichever form was typed.
+        let handleMap = MentionResolver.handles(for: senders)
 
         var bubbleMessages: [CachedMessage] = []
         var reactionRows: [CachedMessage] = []
@@ -191,12 +211,24 @@ struct ChatView: View {
                 .flatMap { Int($0) }
                 .flatMap { byID[$0] }
             let targetKey = String(msg.id)
+            // Authoritative when `msg.mentions` is non-nil (sender
+            // resolved them at send time). Fallback rescans the body
+            // against this client's known senders — covers messages
+            // sent before the receiver had observed the mentioned
+            // person, and any client where the sender's cache was
+            // empty when they typed `@Name`.
+            let resolved: [MentionMatch] = msg.mentions.map { names in
+                names.map { name in
+                    MentionMatch(name: name, handle: handleMap[name] ?? name)
+                }
+            } ?? MentionResolver.resolve(in: msg.body, against: senders)
             return RowItem(
                 message: msg,
                 isMine: msg.kind != .weird && msg.sender == myName,
                 isNewGroup: isNewGroup,
                 replyTarget: replyParent,
-                reactions: aggregated[targetKey] ?? .empty(targetID: targetKey)
+                reactions: aggregated[targetKey] ?? .empty(targetID: targetKey),
+                mentionResolutions: resolved
             )
         }
     }
@@ -282,6 +314,7 @@ struct ChatView: View {
                         showSenderLabel: row.isNewGroup,
                         replyTarget: row.replyTarget,
                         reactions: row.reactions,
+                        mentionResolutions: row.mentionResolutions,
                         mySender: store.displayName,
                         reactionNamespace: reactionNamespace,
                         onReply: { replyingTo = $0 },
@@ -319,20 +352,26 @@ struct ChatView: View {
         .scrollPosition($scrollPosition, anchor: .bottom)
         .scrollEdgeEffectStyle(.soft, for: .top)
         .scrollEdgeEffectStyle(.soft, for: .bottom)
-        // Re-snap to the bottom edge when the SwiftData query first
-        // delivers rows. `initial: true` covers the warm-cache case
-        // where `messages` is already populated when the view mounts.
-        // The cold-cache case relies on the empty→non-empty transition
-        // here (since `@Query` populates after the first body eval).
-        .onChange(of: messages.isEmpty, initial: true) { _, isEmpty in
-            guard !isEmpty else { return }
-            scrollPosition.scrollTo(edge: .bottom)
-        }
-        .onChange(of: messages.last?.persistentModelID) { _, newID in
-            // Only auto-follow when the user is already near the
-            // bottom — never yank them out of scrollback to read a
-            // new arrival they haven't asked for.
-            guard isPinnedToBottom, let newID else { return }
+        // Single handler for both cold-load seed and new-message
+        // auto-follow. Targeting by id (not by edge) is critical with
+        // LazyVStack: id-based scroll forces the framework to
+        // materialize the target row, edge-based scroll only goes to
+        // the bottom of currently-laid-out content (which is the top
+        // of the stack on cold load). `initial: true` runs the seed
+        // synchronously when the view first sees a non-nil last id.
+        .onChange(of: messages.last?.persistentModelID, initial: true) { _, newID in
+            guard let newID else { return }
+            if !didInitialScroll {
+                // Seed runs unconditionally. No animation: we want
+                // the very first paint to land at the bottom, not
+                // animate from the top.
+                scrollPosition.scrollTo(id: newID, anchor: .bottom)
+                didInitialScroll = true
+                return
+            }
+            // Subsequent fires are auto-follow: gated so a user in
+            // scrollback isn't yanked when a new message arrives.
+            guard isPinnedToBottom else { return }
             withAnimation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.22)) {
                 scrollPosition.scrollTo(id: newID, anchor: .bottom)
             }
@@ -508,6 +547,7 @@ private struct RowItem: Identifiable {
     let isNewGroup: Bool
     let replyTarget: CachedMessage?
     let reactions: MessageReactions
+    let mentionResolutions: [MentionMatch]
     var id: PersistentIdentifier { message.persistentModelID }
 }
 
