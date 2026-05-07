@@ -284,6 +284,12 @@ struct ChatView: View {
                             )
                         }
                     )
+                    // `.equatable()` lets SwiftUI skip MessageRow body
+                    // re-eval on scroll-driven ChatView body refreshes.
+                    // Without this, every visible row re-evaluates per
+                    // scroll tick because the closures above are
+                    // non-Equatable and defeat the default view diff.
+                    .equatable()
                     .padding(.top, row.isNewGroup ? 12 : 2)
                     .animation(
                         reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.22),
