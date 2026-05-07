@@ -49,9 +49,27 @@ nuke-keychain:
 
 # === Distribution ===========================================================
 
-# Build a Release Curvy.app and package it into a styled installer at dist/Curvy.dmg.
+# Mirrors the contract used by the release workflow so a locally-built DMG
+# matches what CI would produce. No tags yet → falls back to 0.0.0.
+#
+# Build Release Curvy.app and package it into dist/Curvy-<version>.dmg using the latest v* tag.
 package:
-    ./scripts/build-dmg.sh
+    #!/usr/bin/env bash
+    set -euo pipefail
+    git fetch --tags --quiet 2>/dev/null || true
+    latest=$(git tag --list 'v*' --sort=-version:refname | head -1)
+    latest=${latest:-v0.0.0}
+    if ! [[ "${latest#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      echo "latest tag <${latest}> is not vX.Y.Z — fix manually"
+      exit 1
+    fi
+    version="${latest#v}"
+    echo "==> packaging Curvy ${version}"
+    OUT_DMG="dist/Curvy-${version}.dmg" \
+    VOLNAME="Curvy ${version}" \
+    MARKETING_VERSION="${version}" \
+    CURRENT_PROJECT_VERSION="${version}" \
+      ./scripts/build-dmg.sh
 
 # === Release ================================================================
 
