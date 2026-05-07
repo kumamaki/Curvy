@@ -1,4 +1,5 @@
 import AppKit
+import Inject
 import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
@@ -26,6 +27,7 @@ struct ChatView: View {
     @State private var isPinnedToBottom: Bool = true
     @State private var shakeTrigger: Int = 0
     @State private var isDropTargeted: Bool = false
+    @ObserveInjection private var inject
 
     /// Shared namespace for the reaction "stick" animation. Picker
     /// emojis publish a matched-geometry source keyed by
@@ -98,6 +100,7 @@ struct ChatView: View {
                     store.markRead()
                 }
             }
+            .enableInjection()
     }
 
     /// Window-spanning drop affordance. Shown when the user is

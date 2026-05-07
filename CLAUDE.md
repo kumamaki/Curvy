@@ -127,18 +127,19 @@ envelope. Don't put the room key on the per-file blobs.
 The `justfile` is the canonical dev surface.
 
 ```sh
-just              # list recipes
-just build        # xcodegen + xcodebuild Debug, then reveal in Finder
-just run          # build then launch
-just app          # launch the freshest build
-just kill         # pkill Curvy.app
-just test         # run the test bundle
-just clean        # trash all DerivedData/Curvy-*
-just mint <pat>   # generate first invite — prints new room key to stderr
-just mint-extra <pat> <key>   # generate invites 2/3/4 — reuses given key
-just nuke-keychain            # wipe local Curvy state (re-onboarding tests)
-just src          # open kumamaki/Curvy on github.com
-just room         # open kumamaki/curvy-room on github.com
+just                  # list recipes
+just build            # xcodegen + xcodebuild Debug
+just run              # build, kill any running instance, launch fresh
+just develop          # run with InjectionNext hot-reload (auto-launches the watcher)
+just app              # launch the freshest existing build (no rebuild)
+just kill             # pkill Curvy.app
+just test             # run the test bundle
+just clean            # kill + trash all DerivedData/Curvy-*
+just mint <pat>       # generate first invite — prints new room key to stderr
+just mint-extra <pat> <key>  # generate invites 2/3/4 — reuses given key
+just nuke-keychain    # wipe local Curvy state (re-onboarding tests)
+just package          # build Release + package into dist/Curvy.dmg
+just ship <bump>      # bump v-tag (major|minor|patch), push, trigger Actions
 ```
 
 Requires Xcode 26 + macOS 26 + xcodegen + just.
