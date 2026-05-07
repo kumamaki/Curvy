@@ -23,7 +23,14 @@ struct ChatView: View {
     @State private var draftText: String = ""
     @State private var imageDraft: ImagePipeline.Prepared?
     @State private var replyingTo: CachedMessage?
-    @State private var scrollAnchor: PersistentIdentifier?
+    // Initialized to `.bottom` so the very first layout pass asks
+    // the ScrollView to anchor at the end — equivalent intent to
+    // `.defaultScrollAnchor(.bottom)` but routed through the
+    // imperative `ScrollPosition` API, which (per Apple's own forum
+    // guidance) is the only reliable path with `LazyVStack`. The
+    // declarative `defaultScrollAnchor` is known to leave a blank
+    // viewport with lazy content until the user scrolls.
+    @State private var scrollPosition = ScrollPosition(idType: PersistentIdentifier.self, edge: .bottom)
     @State private var isPinnedToBottom: Bool = true
     @State private var shakeTrigger: Int = 0
     @State private var isDropTargeted: Bool = false
@@ -309,19 +316,25 @@ struct ChatView: View {
                 value: messages.count
             )
         }
-        .scrollPosition(id: $scrollAnchor, anchor: .bottom)
+        .scrollPosition($scrollPosition, anchor: .bottom)
         .scrollEdgeEffectStyle(.soft, for: .top)
         .scrollEdgeEffectStyle(.soft, for: .bottom)
-        .onAppear {
-            scrollAnchor = messages.last?.persistentModelID
+        // Re-snap to the bottom edge when the SwiftData query first
+        // delivers rows. `initial: true` covers the warm-cache case
+        // where `messages` is already populated when the view mounts.
+        // The cold-cache case relies on the empty→non-empty transition
+        // here (since `@Query` populates after the first body eval).
+        .onChange(of: messages.isEmpty, initial: true) { _, isEmpty in
+            guard !isEmpty else { return }
+            scrollPosition.scrollTo(edge: .bottom)
         }
         .onChange(of: messages.last?.persistentModelID) { _, newID in
-            // Only auto-scroll when the user is already near the
+            // Only auto-follow when the user is already near the
             // bottom — never yank them out of scrollback to read a
             // new arrival they haven't asked for.
             guard isPinnedToBottom, let newID else { return }
             withAnimation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.22)) {
-                scrollAnchor = newID
+                scrollPosition.scrollTo(id: newID, anchor: .bottom)
             }
         }
         .onScrollGeometryChange(for: Bool.self) { geometry in
