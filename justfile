@@ -19,12 +19,9 @@ build:
 test:
     cd mac && xcodebuild -project Curvy.xcodeproj -scheme Curvy -configuration Debug test 2>&1 | {{xcb}}
 
-# Open the freshest Debug build.
-app:
-    open "$(ls -dt ~/Library/Developer/Xcode/DerivedData/Curvy-*/Build/Products/Debug/Curvy.app | head -1)"
-
 # Build, kill any running instance, and launch fresh.
-run: build kill app
+run: build kill
+    open "$(ls -dt ~/Library/Developer/Xcode/DerivedData/Curvy-*/Build/Products/Debug/Curvy.app | head -1)"
 
 # Requires `InjectionNext.app` in /Applications — drop the build from
 # https://github.com/johnno1962/InjectionNext/releases once, then edits
@@ -49,7 +46,7 @@ ensure-injection:
       sleep 1
     fi
 
-# Kill any running Curvy instance.
+[private]
 kill:
     pkill -f Curvy.app 2>/dev/null || true
 
