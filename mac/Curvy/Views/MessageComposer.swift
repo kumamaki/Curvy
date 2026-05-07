@@ -142,12 +142,21 @@ struct MessageComposer: View {
     }
 
     private var composerRow: some View {
+        // Buttons are pinned to the bottom of the row so they ride the
+        // last line when the text input grows. Each button is wrapped
+        // in a `frame(height: 28)` matching the single-line text frame,
+        // and given `.padding(.bottom, 9)` matching `mentionAwareInput`'s
+        // `.padding(.vertical, 9)` — this lands every icon's vertical
+        // centre on the same baseline as the text's vertical centre,
+        // regardless of icon size.
         HStack(alignment: .bottom, spacing: 10) {
             attachButton
-                .padding(.bottom, 4)
+                .frame(height: 28)
+                .padding(.bottom, 9)
             mentionAwareInput
             sendButton
-                .padding(.bottom, 2)
+                .frame(height: 28)
+                .padding(.bottom, 9)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
