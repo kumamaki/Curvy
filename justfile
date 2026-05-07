@@ -103,7 +103,13 @@ ship kind:
       patch) patch=$((patch+1)) ;;
     esac
     new="v${major}.${minor}.${patch}"
-    echo "bumping ${latest} → ${new} ({{kind}})"
+    echo "==> bumping {{kind}}: ${latest} → ${new}"
+    echo
+    read -r -p "Push ${new} now? [y/N] " reply
+    case "$reply" in
+      y|Y|yes|YES) ;;
+      *) echo "ship: aborted." >&2; exit 1 ;;
+    esac
     git tag -a "${new}" -m "Release ${new}"
     git push origin "${new}"
     echo "tagged ${new} — workflow:"
