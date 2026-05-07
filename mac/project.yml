@@ -16,12 +16,27 @@ settings:
     DEAD_CODE_STRIPPING: YES
     CLANG_ENABLE_MODULES: YES
 
+# InjectionNext (file watcher) + Inject (SwiftUI ergonomics) power
+# `just develop`. Both are no-op in Release; see Debug overrides on the
+# Curvy target below for the linker / signing changes that let injection
+# load unsigned dylibs at runtime.
+packages:
+  InjectionNext:
+    url: https://github.com/johnno1962/InjectionNext
+    branch: main
+  Inject:
+    url: https://github.com/krzysztofzablocki/Inject
+    from: 1.5.0
+
 targets:
   Curvy:
     type: application
     platform: macOS
     sources:
       - path: Curvy
+    dependencies:
+      - package: InjectionNext
+      - package: Inject
     info:
       path: Curvy/Resources/Info.plist
       properties:
@@ -31,12 +46,10 @@ targets:
         LSApplicationCategoryType: public.app-category.social-networking
         NSHumanReadableCopyright: "Curvy. A private group chat over GitHub."
         NSPrincipalClass: NSApplication
-    entitlements:
-      path: Curvy/Resources/Curvy.entitlements
-      properties:
-        com.apple.security.app-sandbox: true
-        com.apple.security.network.client: true
-        com.apple.security.files.user-selected.read-write: true
+    # Entitlements are NOT auto-generated. Two committed files —
+    # Curvy.entitlements (Release, sandbox on) and Curvy.debug.entitlements
+    # (Debug, sandbox off so InjectionNext can dlopen unsigned dylibs).
+    # Wired per-config under `settings.configs` below.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.kumamaki.Curvy
@@ -51,6 +64,34 @@ targets:
         OTHER_CODE_SIGN_FLAGS: "--timestamp=none"
         COMBINE_HIDPI_IMAGES: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: Curvy
+        CODE_SIGN_ENTITLEMENTS: Curvy/Resources/Curvy.entitlements
+      configs:
+        # Debug-only knobs to make InjectionNext's runtime dylib loading
+        # work. Release stays sandboxed + hardened. See the committed
+        # Curvy.debug.entitlements for the entitlements diff.
+        Debug:
+          # `-interposable` makes every function call go through the
+          # dyld stub table so InjectionNext can swap implementations
+          # at runtime. Without this flag, injection appears to load
+          # but old code keeps running.
+          OTHER_LDFLAGS: $(inherited) -Xlinker -interposable
+          # Point the Debug build at the relaxed entitlements file —
+          # sandbox off, library validation off, network/files
+          # preserved.
+          CODE_SIGN_ENTITLEMENTS: Curvy/Resources/Curvy.debug.entitlements
+          # Hardened Runtime + dlopen-of-unsigned-dylib don't mix.
+          ENABLE_HARDENED_RUNTIME: NO
+          # Ad-hoc sign in Debug. Developer ID needs hardened runtime,
+          # which we just turned off — they're a packaged deal for
+          # distribution, not local dev.
+          CODE_SIGN_IDENTITY: "-"
+          CODE_SIGN_STYLE: Automatic
+          # Required for InjectionNext's log-parsing fallback on Xcode
+          # 16.3+. Cheap to keep on; surfaces compiler invocations the
+          # helper app needs to mirror exactly.
+          EMIT_FRONTEND_COMMAND_LINES: YES
+          # InjectionNext disables itself if compilation caching is on.
+          COMPILATION_CACHE_ENABLE_CACHING: NO
 
   CurvyTests:
     type: bundle.unit-test
@@ -84,6 +125,12 @@ schemes:
         - CurvyTests
     run:
       config: Debug
+      # InjectionNext.app reads this env var to know which directory
+      # to file-watch. Resolved at scheme-run time by Xcode.
+      environmentVariables:
+        - variable: INJECTION_PROJECT_ROOT
+          value: $(SRCROOT)
+          isEnabled: true
     profile:
       config: Release
     analyze:

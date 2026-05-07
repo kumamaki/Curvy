@@ -27,7 +27,7 @@ VOLNAME="${VOLNAME:-Curvy}"
 BG="$PWD/assets/dmg/background.png"
 
 if [[ ! -f "$BG" ]]; then
-  echo "Background missing at <$BG>. Run: just dmg-bg" >&2
+  echo "Background missing at <$BG>. Regenerate with: swift scripts/make-dmg-background.swift assets/dmg" >&2
   exit 1
 fi
 
