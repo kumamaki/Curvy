@@ -131,8 +131,6 @@ just                  # list recipes
 just build            # xcodegen + xcodebuild Debug
 just run              # build, kill any running instance, launch fresh
 just develop          # run with InjectionNext hot-reload (auto-launches the watcher)
-just app              # launch the freshest existing build (no rebuild)
-just kill             # pkill Curvy.app
 just test             # run the test bundle
 just clean            # kill + trash all DerivedData/Curvy-*
 just mint <pat>       # generate first invite — prints new room key to stderr
@@ -238,7 +236,7 @@ But if you ever do:
 ```sh
 # 1. Wipe local state and re-onboard from a clean slate:
 just nuke-keychain
-just app
+just run
 
 # 2. Mint an invite with a known-bad PAT to test the error path:
 just mint github_pat_definitely_invalid | pbcopy
