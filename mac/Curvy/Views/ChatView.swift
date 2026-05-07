@@ -31,7 +31,34 @@ struct ChatView: View {
     // viewport with lazy content until the user scrolls.
     @State private var scrollPosition = ScrollPosition(idType: PersistentIdentifier.self, edge: .bottom)
     @State private var isPinnedToBottom: Bool = true
-    @State private var didInitialScroll: Bool = false
+    // Flips true on the first geometry tick that confirms the cold-load
+    // seed actually landed at the bottom (gap <= 1pt). Until then the
+    // message list renders at opacity 0 — the user never sees the
+    // documented LazyVStack-blank-viewport flash, never sees the seed's
+    // own scrollTo motion, never sees a half-laid-out top-of-stack.
+    // After the flip, this also gates the auto-follow handler so it
+    // can't fire before the seed itself has run.
+    @State private var didSeed: Bool = false
+    // One-shot override of `isPinnedToBottom` for the next bubble that
+    // arrives. Set by `send()` so my own outgoing message yanks me to
+    // the bottom even if I was reading scrollback. Consumed (reset to
+    // false) by the auto-follow handler on the very next bubble id
+    // change.
+    @State private var forceFollowNextBubble: Bool = false
+    // Counter for the "↓ N new" pill. Incremented when a new bubble
+    // lands while the user is in scrollback. The geometry callback
+    // resets it to zero the moment the user returns to the bottom edge.
+    @State private var unreadInScrollback: Int = 0
+    // Snapshotted on scene leaving `.active`. On resume, if true, we
+    // re-snap to the latest message (user was at the bottom and
+    // probably wants to catch up). If false, we leave their scroll
+    // position alone — they were reading old messages.
+    @State private var wasPinnedAtBackground: Bool = true
+    // Drives the brief (~1s) flash on a parent message after the user
+    // taps a reply chip to jump to it. Each row compares its own id
+    // against this and renders a transient highlight overlay when they
+    // match.
+    @State private var highlightedID: PersistentIdentifier?
     @State private var shakeTrigger: Int = 0
     @State private var isDropTargeted: Bool = false
 
@@ -105,6 +132,22 @@ struct ChatView: View {
             .onChange(of: scenePhase) { _, new in
                 if new == .active {
                     store.markRead()
+                    // Re-snap to the latest only if the user was at
+                    // the bottom when they left. id-based scrollTo
+                    // (not edge:) so LazyVStack materializes the
+                    // target row — same fix as the cold-load seed.
+                    // Animations disabled: the user is already
+                    // looking at the screen on resume, a sudden
+                    // scroll would feel jarring.
+                    if wasPinnedAtBackground, let lastID = rows.last?.id {
+                        var t = Transaction()
+                        t.disablesAnimations = true
+                        withTransaction(t) {
+                            scrollPosition.scrollTo(id: lastID, anchor: .bottom)
+                        }
+                    }
+                } else {
+                    wasPinnedAtBackground = isPinnedToBottom
                 }
             }
     }
@@ -317,8 +360,10 @@ struct ChatView: View {
                         mentionResolutions: row.mentionResolutions,
                         mySender: store.displayName,
                         reactionNamespace: reactionNamespace,
+                        isHighlighted: highlightedID == row.id,
                         onReply: { replyingTo = $0 },
                         onCopy: { copy(row.message) },
+                        onJumpToReplyParent: { parent in jumpToParent(parent) },
                         onToggleReaction: { emoji, alreadyMine in
                             toggleReaction(
                                 targetID: String(row.message.id),
@@ -349,39 +394,173 @@ struct ChatView: View {
                 value: messages.count
             )
         }
+        // Hide the list until the seed lands. Avoids the documented
+        // blank-viewport flash where LazyVStack measures empty until
+        // the first `scrollTo(id:)` materializes rows. We're hiding
+        // the rendering, not unmounting it — measurement still runs.
+        .opacity(didSeed ? 1 : 0)
         .scrollPosition($scrollPosition, anchor: .bottom)
         .scrollEdgeEffectStyle(.soft, for: .top)
         .scrollEdgeEffectStyle(.soft, for: .bottom)
-        // Single handler for both cold-load seed and new-message
-        // auto-follow. Targeting by id (not by edge) is critical with
-        // LazyVStack: id-based scroll forces the framework to
-        // materialize the target row, edge-based scroll only goes to
-        // the bottom of currently-laid-out content (which is the top
-        // of the stack on cold load). `initial: true` runs the seed
-        // synchronously when the view first sees a non-nil last id.
-        .onChange(of: messages.last?.persistentModelID, initial: true) { _, newID in
-            guard let newID else { return }
-            if !didInitialScroll {
-                // Seed runs unconditionally. No animation: we want
-                // the very first paint to land at the bottom, not
-                // animate from the top.
-                scrollPosition.scrollTo(id: newID, anchor: .bottom)
-                didInitialScroll = true
-                return
+        .onChange(of: rows.last?.id, initial: true) { _, newID in
+            handleLastBubbleChange(newID)
+        }
+        .onScrollGeometryChange(for: BottomState.self) { geometry in
+            bottomState(geometry)
+        } action: { _, snap in
+            handleBottomState(snap)
+        }
+        .task { await fallbackReveal() }
+        .task(id: highlightedID) { await clearHighlightAfterDelay() }
+        .overlay(alignment: .bottom) { jumpToLatestOverlay }
+        .animation(
+            reduceMotion ? .linear(duration: 0) : .spring(response: 0.32, dampingFraction: 0.85),
+            value: pillVisible
+        )
+    }
+
+    /// Whether the jump-to-latest pill should be on screen this tick.
+    /// Pulled out as a computed property because driving the pill's
+    /// container `.animation` modifier off a multi-clause boolean
+    /// expression inline confuses the type-checker on the
+    /// already-long modifier chain.
+    private var pillVisible: Bool {
+        !isPinnedToBottom && unreadInScrollback > 0
+    }
+
+    /// Floating chip that appears in scrollback when new bubbles
+    /// arrive. Tap jumps to the latest. Wrapped in `.transition` so
+    /// the parent `.animation(value: pillVisible)` modifier gets a
+    /// proper enter/exit motion rather than a hard cut.
+    @ViewBuilder
+    private var jumpToLatestOverlay: some View {
+        if didSeed, pillVisible {
+            JumpToLatestPill(count: unreadInScrollback) {
+                jumpToLatest()
             }
-            // Subsequent fires are auto-follow: gated so a user in
-            // scrollback isn't yanked when a new message arrives.
-            guard isPinnedToBottom else { return }
+            .padding(.bottom, 12)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+
+    /// Geometry → `BottomState` projection. Single tick produces both
+    /// the tight (1pt) bottom check used for the first-reveal gate
+    /// and the loose (80pt) bottom check used for the auto-follow gate.
+    private func bottomState(_ geometry: ScrollGeometry) -> BottomState {
+        let gap = geometry.contentSize.height
+            - (geometry.contentOffset.y + geometry.containerSize.height)
+        return BottomState(
+            atBottomTight: gap <= 1,
+            atBottomLoose: gap <= 80
+        )
+    }
+
+    /// Auto-follow handler. Runs on `rows.last?.id` change with
+    /// `initial: true`, so the very first non-nil id triggers the
+    /// cold-load seed branch. Subsequent fires are steady-state
+    /// auto-follow gated on `forceFollowNextBubble || isPinnedToBottom`
+    /// — non-following arrivals bump the unread counter that drives
+    /// the jump-to-latest pill.
+    ///
+    /// Cold-load seed uses id-based `scrollTo(id:anchor:)` rather than
+    /// `scrollTo(edge:)`. id-based forces LazyVStack to materialize
+    /// the target row, the documented fix for the blank-viewport bug
+    /// — `edge:` only goes to the bottom of currently-laid-out content,
+    /// which on cold load is the top of the stack.
+    private func handleLastBubbleChange(_ newID: PersistentIdentifier?) {
+        guard let newID else { return }
+        if !didSeed {
+            var t = Transaction()
+            t.disablesAnimations = true
+            withTransaction(t) {
+                scrollPosition.scrollTo(id: newID, anchor: .bottom)
+            }
+            return
+        }
+        let shouldFollow = forceFollowNextBubble || isPinnedToBottom
+        if forceFollowNextBubble {
+            forceFollowNextBubble = false
+        }
+        if shouldFollow {
             withAnimation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.22)) {
                 scrollPosition.scrollTo(id: newID, anchor: .bottom)
             }
+        } else {
+            unreadInScrollback += 1
         }
-        .onScrollGeometryChange(for: Bool.self) { geometry in
-            let bottomOfView = geometry.contentOffset.y + geometry.containerSize.height
-            return bottomOfView >= geometry.contentSize.height - 80
-        } action: { _, atBottom in
-            isPinnedToBottom = atBottom
+    }
+
+    /// Geometry-tick handler. Three responsibilities, all driven from
+    /// the single bottom-distance derivation:
+    ///   - first reveal — `atBottomTight` flips `didSeed` so the list
+    ///     fades in once the seed has actually landed.
+    ///   - auto-follow gate — `atBottomLoose` mirrors into
+    ///     `isPinnedToBottom`. Loose threshold so a few pixels of
+    ///     give don't kick the user out of pinned state.
+    ///   - unread reset — returning to the bottom clears the pill.
+    private func handleBottomState(_ snap: BottomState) {
+        if !didSeed, snap.atBottomTight {
+            withAnimation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.18)) {
+                didSeed = true
+            }
         }
+        if isPinnedToBottom != snap.atBottomLoose {
+            isPinnedToBottom = snap.atBottomLoose
+        }
+        if snap.atBottomLoose, unreadInScrollback != 0 {
+            unreadInScrollback = 0
+        }
+    }
+
+    /// Belt-and-suspenders reveal. If the geometry callback never
+    /// observes a bottom-tight tick (zero messages, or some
+    /// unforeseen LazyVStack quirk) we still reveal after 400ms so
+    /// the user never sees a stuck-invisible chat. Whatever scroll
+    /// position we're at when the timer fires is what the user gets.
+    private func fallbackReveal() async {
+        try? await Task.sleep(for: .milliseconds(400))
+        if !didSeed {
+            withAnimation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.18)) {
+                didSeed = true
+            }
+        }
+    }
+
+    /// Auto-clear the reply-chip-jump highlight ~1s after it lands.
+    /// Bound to `.task(id: highlightedID)` so back-to-back jumps
+    /// cancel the previous timer instead of piling up.
+    private func clearHighlightAfterDelay() async {
+        guard highlightedID != nil else { return }
+        let pinned = highlightedID
+        try? await Task.sleep(for: .seconds(1))
+        if highlightedID == pinned {
+            withAnimation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.4)) {
+                highlightedID = nil
+            }
+        }
+    }
+
+    /// Pill-tap action. Jump to the latest bubble with an animated
+    /// scroll. Geometry callback observes the resulting `atBottomLoose`
+    /// and resets `unreadInScrollback` to zero, which dismisses the
+    /// pill via the `pillVisible` predicate.
+    private func jumpToLatest() {
+        guard let lastID = rows.last?.id else { return }
+        withAnimation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.28)) {
+            scrollPosition.scrollTo(id: lastID, anchor: .bottom)
+        }
+    }
+
+    /// Tap-to-jump from a reply chip. Centers the parent in the
+    /// viewport and sets `highlightedID` so the row flashes briefly.
+    /// The `.task(id: highlightedID)` modifier on `messageList`
+    /// clears the highlight after ~1s.
+    private func jumpToParent(_ target: CachedMessage) {
+        let pid = target.persistentModelID
+        withAnimation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.32)) {
+            scrollPosition.scrollTo(id: pid, anchor: .center)
+        }
+        highlightedID = pid
     }
 
     private func send() {
@@ -403,6 +582,14 @@ struct ChatView: View {
         draftText = ""
         imageDraft = nil
         replyingTo = nil
+
+        // Sending while in scrollback is an explicit "I'm here, in
+        // the conversation" act — yank the user to the bottom on the
+        // next bubble arrival regardless of `isPinnedToBottom`. The
+        // store inserts the optimistic row inside the Task below;
+        // when @Query observes it, our auto-follow handler picks up
+        // this flag, follows once, and resets it.
+        forceFollowNextBubble = true
 
         Task {
             do {
@@ -549,5 +736,40 @@ private struct RowItem: Identifiable {
     let reactions: MessageReactions
     let mentionResolutions: [MentionMatch]
     var id: PersistentIdentifier { message.persistentModelID }
+}
+
+/// Two thresholds derived from one geometry tick so a single
+/// `.onScrollGeometryChange` handler can drive both the first-reveal
+/// gate (tight, must be flush at the bottom) and the auto-follow
+/// gate (loose, near the bottom is good enough to "follow").
+private struct BottomState: Equatable {
+    let atBottomTight: Bool
+    let atBottomLoose: Bool
+}
+
+/// Floating "↓ N new" chip that appears near the bottom edge of the
+/// message list when new bubbles arrive while the user is reading
+/// scrollback. Tapping fires the `action` closure (the parent jumps
+/// the scroll to the latest bubble). Glass styling keeps it visually
+/// continuous with the rest of the chrome — buttonStyle(.glass) is
+/// the shipping macOS 26 affordance.
+private struct JumpToLatestPill: View {
+    let count: Int
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.down")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(count == 1 ? "1 new" : "\(count) new")
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .buttonStyle(.glassProminent)
+        .tint(.curvyBrand)
+    }
 }
 

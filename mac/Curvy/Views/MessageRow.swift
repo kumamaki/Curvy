@@ -30,8 +30,18 @@ struct MessageRow: View {
     let mentionResolutions: [MentionMatch]
     let mySender: String
     let reactionNamespace: Namespace.ID
+    /// True for the brief (~1s) flash after a sibling row's reply
+    /// chip jumped the scroll here. Drives a transient overlay on
+    /// the bubble so the eye can find what it was navigated to —
+    /// same affordance Slack/iMessage use after a thread jump.
+    let isHighlighted: Bool
     let onReply: (CachedMessage) -> Void
     let onCopy: () -> Void
+    /// Fires when the user taps this row's inline reply chip. Parent
+    /// scrolls to the quoted message and flashes its highlight. Nil
+    /// `replyTarget` means there's no chip to tap, so the closure is
+    /// only invoked when there's a target to jump to.
+    let onJumpToReplyParent: (CachedMessage) -> Void
     /// Tapback resolver: caller decides whether to send or remove
     /// based on `alreadyMine`. We pre-resolve the boolean here (rather
     /// than re-querying the store) because the aggregated state passed
@@ -230,6 +240,26 @@ struct MessageRow: View {
                 }
 
                 messageBody
+                    .overlay {
+                        // Reply-chip-jump highlight. Bubble-shaped
+                        // brand-orange stroke that fades in/out around
+                        // the row that was navigated to. The animation
+                        // value swap on `isHighlighted` is what makes
+                        // the appearance/disappearance feel alive
+                        // rather than instant.
+                        if isHighlighted {
+                            bubbleShape
+                                .strokeBorder(
+                                    Color.curvyBrand,
+                                    style: StrokeStyle(lineWidth: 2)
+                                )
+                                .transition(.opacity)
+                        }
+                    }
+                    .animation(
+                        reduceMotion ? .linear(duration: 0) : .easeInOut(duration: 0.28),
+                        value: isHighlighted
+                    )
 
                 if !isMine {
                     replyButton
@@ -253,6 +283,8 @@ struct MessageRow: View {
             VStack(alignment: .leading, spacing: 0) {
                 if let target = replyTarget {
                     inlineReplyHeader(target)
+                        .contentShape(Rectangle())
+                        .onTapGesture { onJumpToReplyParent(target) }
                 }
 
                 VStack(alignment: isMine ? .trailing : .leading, spacing: 5) {
@@ -312,6 +344,8 @@ struct MessageRow: View {
                     inlineReplyHeader(target)
                         .frame(width: imageDisplaySize.width, alignment: .leading)
                         .background(isMine ? AnyShapeStyle(.tint) : AnyShapeStyle(Color.curvyInk))
+                        .contentShape(Rectangle())
+                        .onTapGesture { onJumpToReplyParent(target) }
                 }
 
                 ZStack {
@@ -651,6 +685,7 @@ extension MessageRow: @MainActor Equatable {
             && lhs.mySender == rhs.mySender
             && lhs.reactions == rhs.reactions
             && lhs.mentionResolutions == rhs.mentionResolutions
+            && lhs.isHighlighted == rhs.isHighlighted
     }
 }
 
