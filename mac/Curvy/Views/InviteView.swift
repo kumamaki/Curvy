@@ -1,4 +1,3 @@
-import Inject
 import SwiftUI
 
 /// Sole onboarding screen. The user pastes a base64 invite bundle that
@@ -9,7 +8,6 @@ struct InviteView: View {
     @Environment(SessionStore.self) private var session
     @State private var paste: String = ""
     @FocusState private var pasteFieldFocused: Bool
-    @ObserveInjection private var inject
 
     var body: some View {
         VStack(spacing: 28) {
@@ -62,7 +60,6 @@ struct InviteView: View {
         }
         .padding(32)
         .onAppear { pasteFieldFocused = true }
-        .enableInjection()
     }
 
     private var isValidating: Bool {

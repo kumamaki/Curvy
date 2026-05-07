@@ -1,4 +1,3 @@
-import Inject
 import SwiftUI
 
 /// Top-level router. Switches the visible screen on `SessionStore.phase`.
@@ -6,7 +5,6 @@ import SwiftUI
 /// reads the phase.
 struct RootView: View {
     @Environment(SessionStore.self) private var session
-    @ObserveInjection private var inject
 
     var body: some View {
         ZStack {
@@ -36,7 +34,6 @@ struct RootView: View {
                 Color.clear.frame(width: 0, height: 0)
             }
         }
-        .enableInjection()
     }
 }
 
