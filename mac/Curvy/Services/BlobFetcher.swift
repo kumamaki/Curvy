@@ -50,6 +50,25 @@ final class BlobFetcher {
         return cacheDirectory.appending(path: basename, directoryHint: .notDirectory)
     }
 
+    /// Write `data` atomically to `cacheDirectory/<filename>`, creating
+    /// the directory if it doesn't exist yet. Returns the URL written.
+    static func stashPending(filename: String, data: Data) throws -> URL {
+        try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        let url = cacheDirectory.appending(path: filename, directoryHint: .notDirectory)
+        try data.write(to: url, options: .atomic)
+        return url
+    }
+
+    /// Move the pending sidecar at `pendingURL` to the content-addressable
+    /// location for `assetPath`, evicting any stale file already there.
+    /// Returns the final URL.
+    static func relocateSidecar(from pendingURL: URL, toAssetPath assetPath: String) throws -> URL {
+        let finalURL = cacheURL(for: assetPath)
+        try? FileManager.default.removeItem(at: finalURL)
+        try FileManager.default.moveItem(at: pendingURL, to: finalURL)
+        return finalURL
+    }
+
     /// Idempotent: no-op if `message` is already materialized (local
     /// cache hit) or already in flight. Otherwise downloads, decrypts,
     /// writes to disk, and bumps `imageCachedAt` so the UI re-renders.
