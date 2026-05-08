@@ -62,6 +62,7 @@ struct ChatView: View {
     @State private var shakeTrigger: Int = 0
     @State private var isDropTargeted: Bool = false
     @State private var cachedRows: [RowItem] = []
+    @State private var cachedKnownSenders: [String] = []
     // Set to true while handleLastBubbleChange is animating a scroll to
     // bottom. Prevents the geometry callback's intermediate ticks from
     // transiently flipping isPinnedToBottom to false mid-animation,
@@ -85,7 +86,7 @@ struct ChatView: View {
                     imageDraft: $imageDraft,
                     replyingTo: $replyingTo,
                     shakeTrigger: shakeTrigger,
-                    knownSenders: knownSenders,
+                    knownSenders: cachedKnownSenders,
                     onSend: send,
                     onPickError: { _ in shakeTrigger += 1 },
                     onLoadURL: preparePicked(url:),
@@ -401,8 +402,14 @@ struct ChatView: View {
         .onChange(of: cachedRows.last?.id, initial: true) { _, newID in
             handleLastBubbleChange(newID)
         }
-        .onChange(of: messages, initial: true) { _, _ in cachedRows = buildRows() }
-        .onChange(of: store.displayName) { _, _ in cachedRows = buildRows() }
+        .onChange(of: messages.map(\.id), initial: true) { _, _ in
+            cachedRows = buildRows()
+            cachedKnownSenders = knownSenders
+        }
+        .onChange(of: store.displayName) { _, _ in
+            cachedRows = buildRows()
+            cachedKnownSenders = knownSenders
+        }
         .onScrollGeometryChange(for: BottomState.self) { geometry in
             bottomState(geometry)
         } action: { _, snap in
@@ -711,22 +718,31 @@ struct ChatView: View {
 /// to the SwiftUI `.onDrop` modifier on `ChatView`.
 ///
 /// Idempotent — calling `unregisterDraggedTypes()` twice is a no-op.
-/// `updateNSView` re-walks on every render so a freshly-mounted
-/// composer (e.g. after window restore) gets disabled too.
+/// The sweep is guarded by window identity so it only re-runs when
+/// the view moves to a different window (e.g. after window restore),
+/// not on every SwiftUI body re-evaluation.
 private struct DisableTextFieldDrops: NSViewRepresentable {
     func makeNSView(context: Context) -> Hook { Hook() }
 
     func updateNSView(_ nsView: Hook, context: Context) {
-        nsView.scheduleSweep()
+        nsView.scheduleSweepIfNeeded()
     }
 
     final class Hook: NSView {
+        private weak var lastSweptWindow: NSWindow?
+
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             scheduleSweep()
         }
 
+        func scheduleSweepIfNeeded() {
+            guard window !== lastSweptWindow else { return }
+            scheduleSweep()
+        }
+
         func scheduleSweep() {
+            lastSweptWindow = window
             DispatchQueue.main.async { [weak self] in self?.sweep() }
         }
 
