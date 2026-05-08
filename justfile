@@ -25,7 +25,9 @@ run: build kill
 
 [private]
 kill:
+    #!/usr/bin/env bash
     pkill -f Curvy.app 2>/dev/null || true
+    while pgrep -f Curvy.app > /dev/null 2>&1; do sleep 0.1; done
 
 # Trash all DerivedData copies (per CLAUDE.md: trash, never rm).
 clean: kill
