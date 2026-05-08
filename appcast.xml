@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0">
+    <channel>
+        <title>Curvy</title>
+        <link>https://github.com/kumamaki/Curvy</link>
+        <description>Curvy release feed</description>
+        <language>en</language>
+        <!-- Entries are prepended here by scripts/update-appcast.sh on each release. -->
+        <item>
+            <title>1.1.1</title>
+            <pubDate>Fri, 08 May 2026 16:31:33 +0000</pubDate>
+            <link>https://github.com/kumamaki/Curvy</link>
+            <sparkle:version>1.1.1</sparkle:version>
+            <sparkle:shortVersionString>1.1.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/kumamaki/Curvy/releases/download/v1.1.1/Curvy-1.1.1.dmg" length="4140122" type="application/octet-stream" sparkle:edSignature="NukckbwkIImdZHWjRGpX0R/UxEaK2Q+1j+yo9ZPrMc6GC0jn5JZQnxPZE9t70RmC439aFW14JnXJloS1OiuiCw=="/>
+        </item>
+    </channel>
+</rss>
