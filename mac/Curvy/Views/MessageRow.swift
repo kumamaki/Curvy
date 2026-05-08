@@ -454,15 +454,15 @@ struct MessageRow: View {
     /// First on-disk URL for the row's image, preferring the
     /// confirmed cache path and falling back to the pending sidecar.
     /// Returns nil while the bubble is still showing the placeholder.
+    /// Trusts `imageCachedAt` as the cache-presence signal — set by
+    /// BlobFetcher when the file lands and by sendImage for pending
+    /// sidecars — avoiding synchronous stat(2) calls in the view body.
     private var localImageURL: URL? {
+        guard message.imageCachedAt != nil else { return nil }
         if let assetPath = message.assetPath {
-            let url = BlobFetcher.cacheURL(for: assetPath)
-            if FileManager.default.fileExists(atPath: url.path) { return url }
+            return BlobFetcher.cacheURL(for: assetPath)
         }
-        if let url = pendingSidecarURL, FileManager.default.fileExists(atPath: url.path) {
-            return url
-        }
-        return nil
+        return pendingSidecarURL
     }
 
     /// Hand the cached plaintext to the system Quick Look panel. No-op
@@ -490,6 +490,9 @@ struct MessageRow: View {
         let scale = min(1, maxLong / longest)
         let scaledW = min(wF * scale, widthCap)
         let scaledH = hF * (scaledW / wF)
+        guard scaledW.isFinite, scaledH.isFinite, scaledW > 0, scaledH > 0 else {
+            return CGSize(width: 200, height: 200)
+        }
         return CGSize(width: scaledW, height: scaledH)
     }
 
@@ -741,9 +744,9 @@ private enum BodySegment {
 }
 
 /// Walk `body`, finding every `@<token>` span that resolves against
-/// `mentions`, and emit alternating plain + pill segments. Same
-/// boundary rules and longest-first preference as
-/// `MentionResolver.resolve(in:against:)`.
+/// `mentions`, and emit alternating plain + pill segments. Delegates
+/// the `@`-mention boundary scanning to `MentionResolver.pillRanges`
+/// so the rules stay in one place.
 private func makeSegments(
     body: String,
     mentions: [MentionMatch],
@@ -752,43 +755,7 @@ private func makeSegments(
     if body.isEmpty { return [] }
     if mentions.isEmpty { return splitByLinks(body) }
 
-    var candidates: [(token: String, name: String)] = []
-    for match in mentions {
-        candidates.append((token: match.name, name: match.name))
-        if match.handle != match.name {
-            candidates.append((token: match.handle, name: match.name))
-        }
-    }
-    candidates.sort { $0.token.count > $1.token.count }
-
-    var pillRanges: [(range: Range<String.Index>, name: String, token: String)] = []
-    var consumed: [Range<String.Index>] = []
-    for cand in candidates where !cand.token.isEmpty {
-        let bodyToken = "@" + cand.token
-        var cursor = body.startIndex
-        while cursor < body.endIndex,
-              let range = body.range(of: bodyToken, range: cursor..<body.endIndex)
-        {
-            if consumed.contains(where: { $0.overlaps(range) }) {
-                cursor = body.index(after: range.lowerBound)
-                continue
-            }
-            let preOK = range.lowerBound == body.startIndex
-                || body[body.index(before: range.lowerBound)].isWhitespace
-            let postOK = range.upperBound == body.endIndex
-                || body[range.upperBound].isWhitespace
-                || body[range.upperBound].isPunctuation
-            if preOK && postOK {
-                consumed.append(range)
-                pillRanges.append((range: range, name: cand.name, token: cand.token))
-                cursor = range.upperBound
-            } else {
-                cursor = body.index(after: range.lowerBound)
-            }
-        }
-    }
-
-    pillRanges.sort { $0.range.lowerBound < $1.range.lowerBound }
+    let pillRanges = MentionResolver.pillRanges(in: body, resolutions: mentions)
 
     var segments: [BodySegment] = []
     var cursor = body.startIndex
@@ -812,14 +779,18 @@ private func makeSegments(
     }
 }
 
+/// NSDataDetector construction is expensive (compiles an internal
+/// regex), so we share one instance for the lifetime of the process.
+private let linkDetector = try? NSDataDetector(
+    types: NSTextCheckingResult.CheckingType.link.rawValue
+)
+
 /// Scan a plain-text string for URLs and split it into interleaved
 /// `.plain` and `.link` segments. Runs after mention detection so
 /// patterns like `@alice.com` are already claimed as pills before
 /// NSDataDetector sees them.
 private func splitByLinks(_ plain: String) -> [BodySegment] {
-    guard let detector = try? NSDataDetector(
-        types: NSTextCheckingResult.CheckingType.link.rawValue
-    ), !plain.isEmpty else { return [.plain(plain)] }
+    guard let detector = linkDetector, !plain.isEmpty else { return [.plain(plain)] }
 
     let matches = detector.matches(in: plain, range: NSRange(plain.startIndex..., in: plain))
     guard !matches.isEmpty else { return [.plain(plain)] }
