@@ -750,7 +750,7 @@ private func makeSegments(
     myName: String
 ) -> [BodySegment] {
     if body.isEmpty { return [] }
-    if mentions.isEmpty { return [.plain(body)] }
+    if mentions.isEmpty { return splitByLinks(body) }
 
     var candidates: [(token: String, name: String)] = []
     for match in mentions {
