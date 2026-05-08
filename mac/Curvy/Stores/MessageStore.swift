@@ -60,6 +60,10 @@ final class MessageStore {
     @ObservationIgnored private var currentInvite: Invite?
     @ObservationIgnored private var roomKey: Data?
     @ObservationIgnored private(set) var consecutiveErrors: Int = 0
+    // Tracks comment IDs for which a notification has already been posted
+    // this session. Prevents duplicate banners when GitHub's `since`
+    // parameter re-delivers the boundary message on every poll.
+    @ObservationIgnored private var notifiedCommentIDs: Set<String> = []
 
     init(modelContext: ModelContext,
          github: GitHubClient = GitHubClient(),
@@ -125,6 +129,7 @@ final class MessageStore {
         consecutiveErrors = 0
         status = .idle
         unreadCount = 0
+        notifiedCommentIDs.removeAll()
         notifier.setBadge(nil)
         notifier.clearDelivered()
     }
@@ -139,6 +144,7 @@ final class MessageStore {
         if let latest = latestCreatedAt() {
             preferences.lastReadCreatedAt = latest
         }
+        notifiedCommentIDs.removeAll()
         notifier.clearDelivered()
         refreshUnread()
     }
@@ -576,6 +582,14 @@ final class MessageStore {
             let watermark = preferences.lastReadCreatedAt ?? .distantPast
             preferences.lastReadCreatedAt = max(watermark, createdAt)
         } else {
+            let idKey = String(commentID)
+            // GitHub's `since` param is inclusive — the boundary message
+            // is re-delivered on every poll. Guard here so a backgrounded
+            // re-ingest of the same comment doesn't stack a second banner.
+            guard !notifiedCommentIDs.contains(idKey) else {
+                refreshUnread()
+                return
+            }
             let me = preferences.displayName
             // Cold-start fallback: if the sender's cache was empty
             // when they typed `@MyName`, the wire shipped `mentions:
@@ -588,10 +602,11 @@ final class MessageStore {
                     .resolve(in: preview, against: currentKnownSenders())
                     .contains { $0.name == me }
             }()
+            notifiedCommentIDs.insert(idKey)
             if mentionsMe {
-                notifier.postMention(String(commentID), sender, preview)
+                notifier.postMention(idKey, sender, preview)
             } else {
-                notifier.post(String(commentID), sender, preview)
+                notifier.post(idKey, sender, preview)
             }
         }
         refreshUnread()

@@ -1,10 +1,12 @@
 import SwiftData
 import SwiftUI
+import UserNotifications
 
 @main
 struct CurvyApp: App {
     @State private var session = SessionStore()
     @State private var messages: MessageStore
+    @State private var notificationDelegate = NotificationDelegate()
     private let modelContainer: ModelContainer
 
     init() {
@@ -27,6 +29,12 @@ struct CurvyApp: App {
                 .tint(Color.curvyBrand)
                 .frame(minWidth: 520, minHeight: 480)
                 .task {
+                    let center = UNUserNotificationCenter.current()
+                    center.delegate = notificationDelegate
+                    NotificationDelegate.registerCategories()
+                    notificationDelegate.onReply = { [messages] text, replyTo in
+                        try? await messages.send(text: text, replyTo: replyTo)
+                    }
                     await session.bootstrap()
                 }
                 .task(id: session.currentInvite?.token) {

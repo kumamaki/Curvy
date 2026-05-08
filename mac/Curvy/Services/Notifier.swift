@@ -63,6 +63,8 @@ extension Notifier {
                 content.title = title
                 content.body = body
                 content.sound = .default
+                content.categoryIdentifier = NotificationDelegate.messageCategory
+                content.userInfo = ["commentID": id]
                 let request = UNNotificationRequest(identifier: id, content: content, trigger: nil)
                 center.add(request) { error in
                     if let error {
@@ -75,6 +77,8 @@ extension Notifier {
                 content.title = "[@you] " + title
                 content.body = body
                 content.sound = .default
+                content.categoryIdentifier = NotificationDelegate.messageCategory
+                content.userInfo = ["commentID": id]
                 let request = UNNotificationRequest(identifier: id, content: content, trigger: nil)
                 center.add(request) { error in
                     if let error {
