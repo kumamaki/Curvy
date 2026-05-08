@@ -15,10 +15,10 @@ import SwiftData
 /// sign-out. The polling loop is a `Task` owned by this store and
 /// cancelled on `stop()`.
 ///
-/// Concurrency: this class is `@MainActor`, so the `Task` it spawns
-/// inherits MainActor isolation. SwiftData reads/writes and AES-GCM
-/// operations all run on MainActor; network I/O suspends the actor
-/// via `await` so the main thread isn't blocked.
+/// Concurrency: this class is `@MainActor`. SwiftData reads/writes run on
+/// MainActor. AES-GCM decryption runs concurrently on the cooperative pool
+/// via `withTaskGroup` inside `pollOnce` — only the resulting SwiftData
+/// writes return to MainActor. Network I/O suspends the actor via `await`.
 @MainActor
 @Observable
 final class MessageStore {
@@ -150,16 +150,19 @@ final class MessageStore {
     }
 
     private func refreshUnread() {
-        let watermark = preferences.lastReadCreatedAt
         let me = preferences.displayName
-        let descriptor = FetchDescriptor<CachedMessage>()
-        let all = (try? modelContext.fetch(descriptor)) ?? []
-        let count = all.reduce(into: 0) { sum, msg in
-            guard msg.kind == .text || msg.kind == .image else { return }
-            guard msg.sender != me else { return }
-            if let watermark, msg.createdAt <= watermark { return }
-            sum += 1
-        }
+        let watermark = preferences.lastReadCreatedAt
+        let descriptor = FetchDescriptor<CachedMessage>(
+            predicate: #Predicate {
+                ($0.kindRaw == "text" || $0.kindRaw == "image") && $0.sender != me
+            }
+        )
+        let candidates = (try? modelContext.fetch(descriptor)) ?? []
+        // createdAt > watermark filter stays in Swift — optional comparisons
+        // in SwiftData predicates are error-prone across versions.
+        let count = watermark == nil
+            ? candidates.count
+            : candidates.filter { $0.createdAt > watermark! }.count
         unreadCount = count
         notifier.setBadge(badgeLabel(for: count))
     }
@@ -180,15 +183,14 @@ final class MessageStore {
 
     /// Distinct sender names currently in the cache, plus the local
     /// user. Used by the body-text mention resolver on send and by the
-    /// cold-start fallback in `announceIfNeeded`. Cheap — the cache
-    /// holds at most a few thousand rows over the lifetime of a
-    /// 4-person room.
+    /// cold-start fallback in `announceIfNeeded`.
     private func currentKnownSenders() -> [String] {
-        let descriptor = FetchDescriptor<CachedMessage>()
-        let all = (try? modelContext.fetch(descriptor)) ?? []
-        var set = Set(all.map(\.sender))
+        let descriptor = FetchDescriptor<CachedMessage>(
+            predicate: #Predicate { !$0.sender.isEmpty }
+        )
+        let rows = (try? modelContext.fetch(descriptor)) ?? []
+        var set = Set(rows.map(\.sender))
         set.insert(preferences.displayName)
-        set.remove("")
         return set.sorted()
     }
 
@@ -335,14 +337,14 @@ final class MessageStore {
         // path on commit.
         let pendingID = -Int.random(in: 1...Int.max)
         let pendingFilename = "pending-\(abs(pendingID)).jpg"
-        let pendingCacheURL = BlobFetcher.cacheDirectory.appending(path: pendingFilename, directoryHint: .notDirectory)
+        let pendingCacheURL: URL
         do {
-            try FileManager.default.createDirectory(at: BlobFetcher.cacheDirectory, withIntermediateDirectories: true)
-            try prepared.bytes.write(to: pendingCacheURL, options: .atomic)
+            pendingCacheURL = try BlobFetcher.stashPending(filename: pendingFilename, data: prepared.bytes)
         } catch {
             logger.warning("couldn't stash pending image: \(error.localizedDescription, privacy: .public)")
             // Non-fatal — the bubble will just show a placeholder
             // until the first poll cycle materializes the real file.
+            pendingCacheURL = BlobFetcher.cacheDirectory.appending(path: pendingFilename, directoryHint: .notDirectory)
         }
 
         let assetPath = "blobs/\(UUID().uuidString.lowercased()).bin"
@@ -457,10 +459,8 @@ final class MessageStore {
 
         // Move the sidecar JPEG to its content-addressable name so the
         // receiver-side cache lookup in `MessageRow` finds it.
-        let finalCacheURL = BlobFetcher.cacheURL(for: assetPath)
         do {
-            try? FileManager.default.removeItem(at: finalCacheURL)
-            try FileManager.default.moveItem(at: pendingCacheURL, to: finalCacheURL)
+            try BlobFetcher.relocateSidecar(from: pendingCacheURL, toAssetPath: assetPath)
         } catch {
             logger.warning("couldn't relink pending sidecar to <\(assetPath, privacy: .public)>: \(error.localizedDescription, privacy: .public)")
         }
@@ -486,17 +486,50 @@ final class MessageStore {
     func pollOnce() async {
         guard let invite = currentInvite, let key = roomKey else { return }
         do {
-            let since = currentWatermark()
+            let since = pollCursor()
             let comments = try await github.listComments(invite: invite, since: since)
-            for comment in comments {
-                ingest(comment: comment, invite: invite, key: key)
+
+            // Decrypt all comments concurrently off the main thread.
+            // RoomCrypto and MessageEnvelope are Sendable — safe to capture
+            // across the task boundary. We capture only value types here.
+            let localCrypto = crypto
+            let decrypted: [(GitHubClient.IssueComment, MessagePayload)] = await withTaskGroup(
+                of: (GitHubClient.IssueComment, MessagePayload)?.self
+            ) { group in
+                for comment in comments {
+                    group.addTask {
+                        guard let envelope = try? MessageEnvelope.decode(comment.body),
+                              let payload = try? localCrypto.open(envelope, with: key)
+                        else { return nil }
+                        return (comment, payload)
+                    }
+                }
+                var results: [(GitHubClient.IssueComment, MessagePayload)] = []
+                for await result in group {
+                    if let r = result { results.append(r) }
+                }
+                return results
             }
+
+            let decryptedIDs = Set(decrypted.map { $0.0.id })
+            for (comment, payload) in decrypted {
+                ingestDecrypted(comment: comment, payload: payload, invite: invite, key: key)
+            }
+            for comment in comments where !decryptedIDs.contains(comment.id) {
+                logger.warning("dropped comment <\(comment.id, privacy: .public)>: decryption failed")
+                upsertWeird(comment: comment, error: DecryptError.failed)
+            }
+
             consecutiveErrors = 0
             status = .polling
         } catch {
             consecutiveErrors += 1
             status = .error("\(error)")
         }
+    }
+
+    private enum DecryptError: Error {
+        case failed
     }
 
     /// Pure scheduling policy — exposed static so tests can verify the
@@ -524,36 +557,29 @@ final class MessageStore {
 
     // MARK: - Ingest
 
-    private func ingest(comment: GitHubClient.IssueComment, invite: Invite, key: Data) {
-        do {
-            let envelope = try MessageEnvelope.decode(comment.body)
-            let payload = try crypto.open(envelope, with: key)
-            switch payload {
-            case .text(let text):
-                upsertText(comment: comment, payload: payload)
-                announceIfNeeded(
-                    commentID: comment.id,
-                    createdAt: comment.createdAt,
-                    sender: text.sender,
-                    preview: text.body,
-                    mentions: text.mentions
-                )
-            case .image(let image):
-                upsertImage(comment: comment, image: image, invite: invite, key: key)
-                announceIfNeeded(
-                    commentID: comment.id,
-                    createdAt: comment.createdAt,
-                    sender: image.sender,
-                    preview: imagePreview(caption: image.caption)
-                )
-            case .reaction(let reaction):
-                upsertReaction(comment: comment, reaction: reaction)
-            case .reactionRemove(let removal):
-                upsertReactionRemove(comment: comment, removal: removal)
-            }
-        } catch {
-            logger.warning("dropped comment <\(comment.id, privacy: .public)>: \(error.localizedDescription, privacy: .public)")
-            upsertWeird(comment: comment, error: error)
+    private func ingestDecrypted(comment: GitHubClient.IssueComment, payload: MessagePayload, invite: Invite, key: Data) {
+        switch payload {
+        case .text(let text):
+            upsertText(comment: comment, payload: payload)
+            announceIfNeeded(
+                commentID: comment.id,
+                createdAt: comment.createdAt,
+                sender: text.sender,
+                preview: text.body,
+                mentions: text.mentions
+            )
+        case .image(let image):
+            upsertImage(comment: comment, image: image, invite: invite, key: key)
+            announceIfNeeded(
+                commentID: comment.id,
+                createdAt: comment.createdAt,
+                sender: image.sender,
+                preview: imagePreview(caption: image.caption)
+            )
+        case .reaction(let reaction):
+            upsertReaction(comment: comment, reaction: reaction)
+        case .reactionRemove(let removal):
+            upsertReactionRemove(comment: comment, removal: removal)
         }
     }
 
@@ -731,12 +757,12 @@ final class MessageStore {
         try? modelContext.save()
     }
 
-    private func currentWatermark() -> Date? {
+    private func pollCursor() -> Date? {
         var descriptor = FetchDescriptor<CachedMessage>(
-            sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]
+            sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
         )
         descriptor.fetchLimit = 1
-        return (try? modelContext.fetch(descriptor))?.first?.updatedAt
+        return (try? modelContext.fetch(descriptor))?.first?.createdAt
     }
 
     // MARK: - Reactions (v2)

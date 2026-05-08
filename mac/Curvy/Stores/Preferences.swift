@@ -31,11 +31,13 @@ final class Preferences {
         }
     }
 
-    /// High-water mark of `createdAt` for messages the user has seen.
-    /// Anything strictly newer is "unread" for badge + notification
-    /// purposes. `nil` on first launch — `MessageStore.start` sets it
-    /// to the latest cached message at that point so historical
-    /// content doesn't trigger a wave of notifications.
+    /// Read cursor: high-water mark of `createdAt` for messages the user
+    /// has seen. Anything strictly newer counts as unread (badge + banner).
+    /// Distinct from `MessageStore.pollCursor()`, which is the `since`
+    /// parameter passed to GitHub — that one advances when new comments
+    /// arrive, this one advances only when the user looks at them.
+    /// `nil` on first launch — `MessageStore.start` sets it to the newest
+    /// cached message so historical content doesn't fire a wave of banners.
     var lastReadCreatedAt: Date? {
         didSet {
             if let lastReadCreatedAt {
