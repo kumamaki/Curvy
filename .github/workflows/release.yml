@@ -47,8 +47,8 @@ jobs:
           CERT_PATH="$RUNNER_TEMP/certificate.p12"
           echo "$CERTIFICATE_P12_BASE64" | base64 --decode -o "$CERT_PATH"
           security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$CERTIFICATE_PASSWORD" \
-            -T /usr/bin/codesign -T /usr/bin/security
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+            -A -t cert -f pkcs12
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychain -d user -s "$KEYCHAIN_PATH"
 
       - name: Build, sign, notarize, and staple DMG
@@ -62,6 +62,12 @@ jobs:
           NOTARIZATION_PASSWORD: ${{ secrets.NOTARIZATION_PASSWORD }}
         run: ./scripts/build-dmg.sh
 
+      - name: Fetch canonical appcast from releases branch
+        run: |
+          if git fetch origin releases 2>/dev/null && git show-ref --quiet refs/remotes/origin/releases; then
+            git checkout origin/releases -- appcast.xml 2>/dev/null || true
+          fi
+
       - name: Update appcast.xml
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
@@ -71,13 +77,21 @@ jobs:
             "${{ steps.version.outputs.version }}" \
             "dist/Curvy-${{ steps.version.outputs.version }}.dmg"
 
-      - name: Commit appcast.xml to main
+      - name: Publish appcast.xml to releases branch
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          cp appcast.xml /tmp/generated-appcast.xml
+          if git show-ref --quiet refs/remotes/origin/releases; then
+            git checkout -f origin/releases -B releases
+          else
+            git checkout --orphan releases
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+          cp /tmp/generated-appcast.xml appcast.xml
           git add appcast.xml
           git commit -m "chore: update appcast for v${{ steps.version.outputs.version }}"
-          git push origin HEAD:main
+          git push origin releases
 
       - name: Create GitHub Release
         env:
