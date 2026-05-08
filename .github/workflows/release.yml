@@ -33,13 +33,33 @@ jobs:
           tar -xJf sparkle.tar.xz -C sparkle-tools
           echo "bin=$PWD/sparkle-tools/bin" >> "$GITHUB_OUTPUT"
 
-      - name: Build Release DMG (unsigned, styled install window)
+      - name: Import Developer ID certificate
+        env:
+          CERTIFICATE_P12_BASE64: ${{ secrets.DEVELOPER_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ vars.KEYCHAIN_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          echo "$CERTIFICATE_P12_BASE64" | base64 --decode -o "$CERT_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+      - name: Build, sign, notarize, and staple DMG
         env:
           OUT_DMG: dist/Curvy-${{ steps.version.outputs.version }}.dmg
           VOLNAME: Curvy ${{ steps.version.outputs.version }}
           MARKETING_VERSION: ${{ steps.version.outputs.version }}
           CURRENT_PROJECT_VERSION: ${{ steps.version.outputs.version }}
-          CODE_SIGN: "no"
+          NOTARIZATION_APPLE_ID: ${{ secrets.NOTARIZATION_APPLE_ID }}
+          NOTARIZATION_TEAM_ID: ${{ vars.NOTARIZATION_TEAM_ID }}
+          NOTARIZATION_PASSWORD: ${{ secrets.NOTARIZATION_PASSWORD }}
         run: ./scripts/build-dmg.sh
 
       - name: Update appcast.xml
