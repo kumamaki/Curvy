@@ -61,6 +61,12 @@ struct ChatView: View {
     @State private var highlightedID: PersistentIdentifier?
     @State private var shakeTrigger: Int = 0
     @State private var isDropTargeted: Bool = false
+    @State private var cachedRows: [RowItem] = []
+    // Set to true while handleLastBubbleChange is animating a scroll to
+    // bottom. Prevents the geometry callback's intermediate ticks from
+    // transiently flipping isPinnedToBottom to false mid-animation,
+    // which would miscount a concurrent new message as unread.
+    @State private var isProgrammaticallyScrolling: Bool = false
 
     /// Shared namespace for the reaction "stick" animation. Picker
     /// emojis publish a matched-geometry source keyed by
@@ -129,7 +135,7 @@ struct ChatView: View {
                     // Animations disabled: the user is already
                     // looking at the screen on resume, a sudden
                     // scroll would feel jarring.
-                    if wasPinnedAtBackground, let lastID = rows.last?.id {
+                    if wasPinnedAtBackground, let lastID = cachedRows.last?.id {
                         var t = Transaction()
                         t.disablesAnimations = true
                         withTransaction(t) {
@@ -212,7 +218,7 @@ struct ChatView: View {
         return set.sorted()
     }
 
-    private var rows: [RowItem] {
+    private func buildRows() -> [RowItem] {
         let myName = store.displayName
         let senders = knownSenders
         // Handle map is the same for every row in this snapshot, so
@@ -340,7 +346,7 @@ struct ChatView: View {
     private var messageList: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
-                ForEach(rows) { row in
+                ForEach(cachedRows) { row in
                     MessageRow(
                         message: row.message,
                         isMine: row.isMine,
@@ -392,9 +398,11 @@ struct ChatView: View {
         .scrollPosition($scrollPosition, anchor: .bottom)
         .scrollEdgeEffectStyle(.soft, for: .top)
         .scrollEdgeEffectStyle(.soft, for: .bottom)
-        .onChange(of: rows.last?.id, initial: true) { _, newID in
+        .onChange(of: cachedRows.last?.id, initial: true) { _, newID in
             handleLastBubbleChange(newID)
         }
+        .onChange(of: messages, initial: true) { _, _ in cachedRows = buildRows() }
+        .onChange(of: store.displayName) { _, _ in cachedRows = buildRows() }
         .onScrollGeometryChange(for: BottomState.self) { geometry in
             bottomState(geometry)
         } action: { _, snap in
@@ -472,6 +480,7 @@ struct ChatView: View {
             forceFollowNextBubble = false
         }
         if shouldFollow {
+            isProgrammaticallyScrolling = true
             withAnimation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.22)) {
                 scrollPosition.scrollTo(id: newID, anchor: .bottom)
             }
@@ -494,8 +503,19 @@ struct ChatView: View {
                 didSeed = true
             }
         }
-        if isPinnedToBottom != snap.atBottomLoose {
-            isPinnedToBottom = snap.atBottomLoose
+        if isProgrammaticallyScrolling {
+            if snap.atBottomTight {
+                isProgrammaticallyScrolling = false
+                isPinnedToBottom = true
+            }
+            // Skip the normal isPinnedToBottom update while mid-animation.
+            // Intermediate geometry ticks during the scroll would otherwise
+            // transiently set isPinnedToBottom = false, causing the next
+            // concurrent arrival to be miscounted as unread.
+        } else {
+            if isPinnedToBottom != snap.atBottomLoose {
+                isPinnedToBottom = snap.atBottomLoose
+            }
         }
         if snap.atBottomLoose, unreadInScrollback != 0 {
             unreadInScrollback = 0
@@ -535,7 +555,7 @@ struct ChatView: View {
     /// and resets `unreadInScrollback` to zero, which dismisses the
     /// pill via the `pillVisible` predicate.
     private func jumpToLatest() {
-        guard let lastID = rows.last?.id else { return }
+        guard let lastID = cachedRows.last?.id else { return }
         withAnimation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.28)) {
             scrollPosition.scrollTo(id: lastID, anchor: .bottom)
         }
@@ -656,18 +676,28 @@ struct ChatView: View {
     }
 
     private func preparePicked(url: URL) {
-        do {
-            imageDraft = try pipeline.prepare(url: url)
-        } catch {
-            shakeTrigger += 1
+        Task {
+            do {
+                let prepared = try await Task.detached(priority: .userInitiated) {
+                    try self.pipeline.prepare(url: url)
+                }.value
+                imageDraft = prepared
+            } catch {
+                shakeTrigger += 1
+            }
         }
     }
 
     private func preparePicked(image: NSImage) {
-        do {
-            imageDraft = try pipeline.prepare(image: image)
-        } catch {
-            shakeTrigger += 1
+        Task {
+            do {
+                let prepared = try await Task.detached(priority: .userInitiated) {
+                    try self.pipeline.prepare(image: image)
+                }.value
+                imageDraft = prepared
+            } catch {
+                shakeTrigger += 1
+            }
         }
     }
 }
@@ -751,9 +781,9 @@ private struct JumpToLatestPill: View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Image(systemName: "arrow.down")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.caption2.weight(.semibold))
                 Text(count == 1 ? "1 new" : "\(count) new")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.caption.weight(.medium))
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)

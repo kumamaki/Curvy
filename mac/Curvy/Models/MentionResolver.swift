@@ -108,6 +108,56 @@ enum MentionResolver {
             .sorted { $0.name < $1.name }
     }
 
+    /// Locate every `@<token>` span in `body` for the given resolved
+    /// mentions, using the same boundary rules as `resolve(in:against:)`.
+    /// Returns the matched ranges sorted by position, with no overlaps.
+    /// Used by the renderer to build pill segments without duplicating
+    /// the scanning logic.
+    static func pillRanges(
+        in body: String,
+        resolutions: [MentionMatch]
+    ) -> [(range: Range<String.Index>, name: String, token: String)] {
+        guard !body.isEmpty, !resolutions.isEmpty else { return [] }
+
+        var candidates: [(token: String, name: String)] = []
+        for match in resolutions {
+            candidates.append((token: match.name, name: match.name))
+            if match.handle != match.name {
+                candidates.append((token: match.handle, name: match.name))
+            }
+        }
+        candidates.sort { $0.token.count > $1.token.count }
+
+        var result: [(range: Range<String.Index>, name: String, token: String)] = []
+        var consumed: [Range<String.Index>] = []
+        for cand in candidates where !cand.token.isEmpty {
+            let bodyToken = "@" + cand.token
+            var cursor = body.startIndex
+            while cursor < body.endIndex,
+                  let range = body.range(of: bodyToken, range: cursor..<body.endIndex)
+            {
+                if consumed.contains(where: { $0.overlaps(range) }) {
+                    cursor = body.index(after: range.lowerBound)
+                    continue
+                }
+                let preOK = range.lowerBound == body.startIndex
+                    || body[body.index(before: range.lowerBound)].isWhitespace
+                let postOK = range.upperBound == body.endIndex
+                    || body[range.upperBound].isWhitespace
+                    || body[range.upperBound].isPunctuation
+                if preOK && postOK {
+                    consumed.append(range)
+                    result.append((range: range, name: cand.name, token: cand.token))
+                    cursor = range.upperBound
+                } else {
+                    cursor = body.index(after: range.lowerBound)
+                }
+            }
+        }
+        result.sort { $0.range.lowerBound < $1.range.lowerBound }
+        return result
+    }
+
     private static func firstWord(of name: String) -> String {
         name.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
             .first
