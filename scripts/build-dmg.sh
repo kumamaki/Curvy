@@ -9,7 +9,12 @@
 #   VOLNAME                  mounted volume name (e.g. "Curvy 1.2.3")
 #   MARKETING_VERSION        forwarded to xcodebuild
 #   CURRENT_PROJECT_VERSION  forwarded to xcodebuild
-#   CODE_SIGN=no             disable code signing (CI runner without cert)
+#   CODE_SIGN=no             disable code signing entirely (rare: CI runner without cert)
+#
+# Notarization (optional — skipped if vars are absent):
+#   NOTARIZATION_APPLE_ID    Apple ID used for notarization (e.g. you@example.com)
+#   NOTARIZATION_TEAM_ID     10-char team ID (e.g. 4QB74VU5X3)
+#   NOTARIZATION_PASSWORD    App-specific password from appleid.apple.com
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -87,6 +92,26 @@ create-dmg \
   "$OUT_DMG" \
   "$STAGING"
 
+if [[ "${CODE_SIGN:-yes}" != "no" ]]; then
+  SIGN_ID="${CODE_SIGN_IDENTITY:-Developer ID Application}"
+
+  echo "==> Signing DMG"
+  codesign --sign "$SIGN_ID" --timestamp "$OUT_DMG"
+
+  if [[ -n "${NOTARIZATION_APPLE_ID:-}" && -n "${NOTARIZATION_TEAM_ID:-}" && -n "${NOTARIZATION_PASSWORD:-}" ]]; then
+    echo "==> Notarizing (this takes a minute)"
+    xcrun notarytool submit "$OUT_DMG" \
+      --apple-id  "${NOTARIZATION_APPLE_ID}" \
+      --team-id   "${NOTARIZATION_TEAM_ID}" \
+      --password  "${NOTARIZATION_PASSWORD}" \
+      --wait
+
+    echo "==> Stapling"
+    xcrun stapler staple "$OUT_DMG"
+  else
+    echo "==> Skipping notarization (NOTARIZATION_APPLE_ID / TEAM_ID / PASSWORD not set)"
+  fi
+fi
+
 echo "==> Done"
 ls -lh "$OUT_DMG"
-
