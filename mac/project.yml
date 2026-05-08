@@ -1,5 +1,10 @@
 name: Curvy
 
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: 2.9.1
+
 options:
   bundleIdPrefix: dev.kumamaki
   deploymentTarget:
@@ -22,6 +27,9 @@ targets:
     platform: macOS
     sources:
       - path: Curvy
+    dependencies:
+      - package: Sparkle
+        product: Sparkle
     info:
       path: Curvy/Resources/Info.plist
       properties:
@@ -31,6 +39,9 @@ targets:
         LSApplicationCategoryType: public.app-category.social-networking
         NSHumanReadableCopyright: "Curvy. A private group chat over GitHub."
         NSPrincipalClass: NSApplication
+        SUFeedURL: "https://raw.githubusercontent.com/kumamaki/Curvy/main/appcast.xml"
+        SUPublicEDKey: "dvrj71Q82iGiv8DxXh7CnboFFHpddak9itUfv5AbZlo="
+        SUEnableAutomaticChecks: true
     entitlements:
       path: Curvy/Resources/Curvy.entitlements
       properties:
