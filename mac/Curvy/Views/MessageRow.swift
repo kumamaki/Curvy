@@ -885,15 +885,22 @@ private struct PillFlowLayout: Layout {
         var lineHeight: CGFloat = 0
         var maxRight: CGFloat = 0
         for sub in subviews {
-            let size = sub.sizeThatFits(.unspecified)
-            if x + size.width > maxWidth && x > 0 {
+            let idealSize = sub.sizeThatFits(.unspecified)
+            // Wrap to next line if segment doesn't fit and we're not at line start.
+            if x > 0 && x + idealSize.width > maxWidth {
                 y += lineHeight + lineSpacing
                 x = 0
                 lineHeight = 0
             }
-            frames.append(CGRect(x: x, y: y, width: size.width, height: size.height))
-            x += size.width + horizontalSpacing
-            lineHeight = max(lineHeight, size.height)
+            // Constrain to remaining line width so Text re-flows vertically.
+            let available = maxWidth - x
+            let placedWidth = min(idealSize.width, available)
+            let placedHeight = placedWidth < idealSize.width
+                ? sub.sizeThatFits(ProposedViewSize(width: placedWidth, height: nil)).height
+                : idealSize.height
+            frames.append(CGRect(x: x, y: y, width: placedWidth, height: placedHeight))
+            x += placedWidth + horizontalSpacing
+            lineHeight = max(lineHeight, placedHeight)
             maxRight = max(maxRight, x - horizontalSpacing)
         }
         return (frames, CGSize(width: maxRight, height: y + lineHeight))
