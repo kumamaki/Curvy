@@ -717,6 +717,15 @@ private struct PilledBody: View {
                         .padding(.horizontal, 6)
                         .padding(.vertical, 1)
                         .background(.white, in: Capsule())
+                case .link(let text, let url):
+                    Button {
+                        NSWorkspace.shared.open(url)
+                    } label: {
+                        Text(text)
+                            .underline()
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white.opacity(0.75))
                 }
             }
         }
@@ -728,6 +737,7 @@ private struct PilledBody: View {
 private enum BodySegment {
     case plain(String)
     case pill(name: String, token: String, isSelf: Bool)
+    case link(text: String, url: URL)
 }
 
 /// Walk `body`, finding every `@<token>` span that resolves against
@@ -796,7 +806,38 @@ private func makeSegments(
     if cursor < body.endIndex {
         segments.append(.plain(String(body[cursor..<body.endIndex])))
     }
-    return segments
+    return segments.flatMap { segment in
+        if case .plain(let text) = segment { return splitByLinks(text) }
+        return [segment]
+    }
+}
+
+/// Scan a plain-text string for URLs and split it into interleaved
+/// `.plain` and `.link` segments. Runs after mention detection so
+/// patterns like `@alice.com` are already claimed as pills before
+/// NSDataDetector sees them.
+private func splitByLinks(_ plain: String) -> [BodySegment] {
+    guard let detector = try? NSDataDetector(
+        types: NSTextCheckingResult.CheckingType.link.rawValue
+    ), !plain.isEmpty else { return [.plain(plain)] }
+
+    let matches = detector.matches(in: plain, range: NSRange(plain.startIndex..., in: plain))
+    guard !matches.isEmpty else { return [.plain(plain)] }
+
+    var result: [BodySegment] = []
+    var cursor = plain.startIndex
+    for match in matches {
+        guard let url = match.url, let range = Range(match.range, in: plain) else { continue }
+        if cursor < range.lowerBound {
+            result.append(.plain(String(plain[cursor..<range.lowerBound])))
+        }
+        result.append(.link(text: String(plain[range]), url: url))
+        cursor = range.upperBound
+    }
+    if cursor < plain.endIndex {
+        result.append(.plain(String(plain[cursor...])))
+    }
+    return result
 }
 
 /// Wrapping inline-flow layout. Each subview takes its natural size
