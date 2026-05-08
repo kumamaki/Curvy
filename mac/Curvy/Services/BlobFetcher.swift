@@ -87,7 +87,11 @@ final class BlobFetcher {
             // landed in a previous run before we recorded it.
             if message.imageCachedAt == nil {
                 message.imageCachedAt = Date()
-                try? modelContext.save()
+                do {
+                    try modelContext.save()
+                } catch {
+                    logger.error("imageCachedAt save failed for <\(assetPath, privacy: .public)>: \(error.localizedDescription, privacy: .public)")
+                }
             }
             return
         }
@@ -146,7 +150,7 @@ final class BlobFetcher {
             let descriptor = FetchDescriptor<CachedMessage>(predicate: #Predicate { $0.id == messageID })
             if let row = (try? modelContext.fetch(descriptor))?.first {
                 row.imageCachedAt = Date()
-                try? modelContext.save()
+                try modelContext.save()
             }
         } catch {
             logger.warning("materialize failed for <\(assetPath, privacy: .public)>: \(error.localizedDescription, privacy: .public)")

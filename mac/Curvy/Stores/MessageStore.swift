@@ -520,6 +520,8 @@ final class MessageStore {
                 upsertWeird(comment: comment, error: DecryptError.failed)
             }
 
+            try modelContext.save()
+
             consecutiveErrors = 0
             status = .polling
         } catch {
@@ -677,7 +679,6 @@ final class MessageStore {
             )
             modelContext.insert(cached)
         }
-        try? modelContext.save()
     }
 
     private func upsertImage(
@@ -727,7 +728,6 @@ final class MessageStore {
             modelContext.insert(cached)
             row = cached
         }
-        try? modelContext.save()
 
         // Kick off the receive-side download + decrypt. Idempotent —
         // a no-op on cache hit, deduped against in-flight assets.
@@ -754,7 +754,6 @@ final class MessageStore {
             )
             modelContext.insert(cached)
         }
-        try? modelContext.save()
     }
 
     private func pollCursor() -> Date? {
@@ -908,7 +907,6 @@ final class MessageStore {
             )
             modelContext.insert(cached)
         }
-        try? modelContext.save()
     }
 
     private func upsertReactionRemove(
@@ -939,7 +937,5 @@ final class MessageStore {
             )
             modelContext.insert(cached)
         }
-        try? modelContext.save()
     }
 }
-
