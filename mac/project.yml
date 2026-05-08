@@ -39,7 +39,7 @@ targets:
         LSApplicationCategoryType: public.app-category.social-networking
         NSHumanReadableCopyright: "Curvy. A private group chat over GitHub."
         NSPrincipalClass: NSApplication
-        SUFeedURL: "https://raw.githubusercontent.com/kumamaki/Curvy/main/appcast.xml"
+        SUFeedURL: "https://raw.githubusercontent.com/kumamaki/Curvy/releases/appcast.xml"
         SUPublicEDKey: "dvrj71Q82iGiv8DxXh7CnboFFHpddak9itUfv5AbZlo="
         SUEnableAutomaticChecks: true
     entitlements:
