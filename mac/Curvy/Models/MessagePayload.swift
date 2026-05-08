@@ -271,20 +271,24 @@ struct ImageMessage: Codable, Sendable, Equatable {
     }
 }
 
-/// A reaction (an emoji applied by `sender` to a target message).
+/// Shared payload for both `.reaction` and `.reactionRemove` message kinds.
 ///
-/// `targetID` is the GitHub comment ID of the message being reacted
-/// to, stringified — same addressing as `TextMessage.replyTo`. Using
-/// the comment ID directly means reactions don't need a synthetic ID
-/// layer and stay addressable across re-polling.
+/// `targetID` is the GitHub comment ID of the message being reacted to,
+/// stringified — same addressing as `TextMessage.replyTo`. Using the
+/// comment ID directly means reactions don't need a synthetic ID layer and
+/// stay addressable across re-polling.
 ///
-/// `sender` lives inside the ciphertext per the project's hard rule
-/// that identity must never be derivable from `comment.user.login`.
-/// CLAUDE.md's wire-format sketch omitted `sender`, but it's required
-/// for grouping ("who already reacted with X?") and for the toggle
-/// resolver — adding it follows the spirit of the identity-inside-
-/// ciphertext rule, which is load-bearing.
-struct ReactionMessage: Codable, Sendable, Equatable {
+/// `sender` lives inside the ciphertext per the project's hard rule that
+/// identity must never be derivable from `comment.user.login`. The wire-
+/// format sketch in CLAUDE.md omitted `sender`, but it's required for
+/// grouping ("who already reacted with X?") and for the toggle resolver.
+///
+/// `sentAt` on removes lets a remove beat a same-tick re-add from the same
+/// sender — the render-time aggregator picks the winner by timestamp.
+///
+/// The `type` discriminator (`"reaction"` vs `"reaction_remove"`) is owned
+/// by `MessagePayload`, not this struct, so the wire format is unchanged.
+struct ReactEvent: Codable, Sendable, Equatable {
     let sender: String
     let targetID: String
     let emoji: String
@@ -328,54 +332,8 @@ struct ReactionMessage: Codable, Sendable, Equatable {
     }
 }
 
-/// Revokes a previously-sent reaction. Carries `sentAt` so a remove
-/// can win against a same-tick re-add of the same emoji from the
-/// same sender — the render-time aggregator picks the winner by
-/// timestamp. Without `sentAt`, re-polling could permanently lose
-/// the ordering information needed to resolve toggles.
-struct ReactionRemoveMessage: Codable, Sendable, Equatable {
-    let sender: String
-    let targetID: String
-    let emoji: String
-    let sentAt: Date
-
-    enum CodingKeys: String, CodingKey {
-        case sender
-        case targetID = "target_id"
-        case emoji
-        case sentAt = "sent_at"
-    }
-
-    init(sender: String, targetID: String, emoji: String, sentAt: Date) {
-        self.sender = sender
-        self.targetID = targetID
-        self.emoji = emoji
-        self.sentAt = canonicalDate(from: sentAt)
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let sender = try container.decode(String.self, forKey: .sender)
-        let targetID = try container.decode(String.self, forKey: .targetID)
-        let emoji = try container.decode(String.self, forKey: .emoji)
-        let ms = try container.decode(Int64.self, forKey: .sentAt)
-        self.init(
-            sender: sender,
-            targetID: targetID,
-            emoji: emoji,
-            sentAt: Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
-        )
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(sender, forKey: .sender)
-        try container.encode(targetID, forKey: .targetID)
-        try container.encode(emoji, forKey: .emoji)
-        let ms = Int64((sentAt.timeIntervalSince1970 * 1000).rounded())
-        try container.encode(ms, forKey: .sentAt)
-    }
-}
+typealias ReactionMessage = ReactEvent
+typealias ReactionRemoveMessage = ReactEvent
 
 /// Round-trips a Date through the same Int64-ms conversion used on the
 /// wire so `==` comparisons after a seal/open cycle are reliable.

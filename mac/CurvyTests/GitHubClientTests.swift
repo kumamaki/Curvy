@@ -40,8 +40,8 @@ struct GitHubClientTests {
         do {
             try await client.verifyAccess(invite: invite)
             Issue.record("expected verifyAccess to throw on 401")
-        } catch GitHubClient.GitHubError.http(let code, _) {
-            #expect(code == 401)
+        } catch GitHubClient.GitHubError.unauthorized {
+            // expected
         } catch {
             Issue.record("unexpected error: <\(error)>")
         }

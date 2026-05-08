@@ -46,7 +46,15 @@ struct MentionTextView: NSViewRepresentable {
     let onPickerDismiss: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(self)
+        Coordinator(
+            text: $text,
+            activeQuery: $activeQuery,
+            pickerActive: pickerActive,
+            onSend: onSend,
+            onPickerNavigate: onPickerNavigate,
+            onPickerCommit: onPickerCommit,
+            onPickerDismiss: onPickerDismiss
+        )
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -83,14 +91,22 @@ struct MentionTextView: NSViewRepresentable {
 
         scrollView.documentView = textView
         context.coordinator.textView = textView
-        context.coordinator.installCommitHandler()
+        context.coordinator.installCommitHandler(controller: controller)
         return scrollView
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? MentionNSTextView else { return }
-        context.coordinator.parent = self
-        context.coordinator.installCommitHandler()
+        context.coordinator.update(
+            text: $text,
+            activeQuery: $activeQuery,
+            pickerActive: pickerActive,
+            onSend: onSend,
+            onPickerNavigate: onPickerNavigate,
+            onPickerCommit: onPickerCommit,
+            onPickerDismiss: onPickerDismiss,
+            controller: controller
+        )
 
         if textView.string != text {
             // External binding update (e.g. parent cleared the field
@@ -137,7 +153,14 @@ struct MentionTextView: NSViewRepresentable {
 
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
-        var parent: MentionTextView
+        var textBinding: Binding<String>
+        var activeQueryBinding: Binding<String?>
+        var pickerActive: Bool
+        var onSend: () -> Void
+        var onPickerNavigate: (Int) -> Void
+        var onPickerCommit: () -> Void
+        var onPickerDismiss: () -> Void
+
         weak var textView: MentionNSTextView?
         /// One-shot guard for "focus the composer when the window
         /// first attaches the view." `makeNSView` runs before the
@@ -147,17 +170,51 @@ struct MentionTextView: NSViewRepresentable {
         /// so we don't fight the user's own focus changes.
         var didFocusOnce: Bool = false
 
-        init(_ parent: MentionTextView) {
-            self.parent = parent
+        init(
+            text: Binding<String>,
+            activeQuery: Binding<String?>,
+            pickerActive: Bool,
+            onSend: @escaping () -> Void,
+            onPickerNavigate: @escaping (Int) -> Void,
+            onPickerCommit: @escaping () -> Void,
+            onPickerDismiss: @escaping () -> Void
+        ) {
+            self.textBinding = text
+            self.activeQueryBinding = activeQuery
+            self.pickerActive = pickerActive
+            self.onSend = onSend
+            self.onPickerNavigate = onPickerNavigate
+            self.onPickerCommit = onPickerCommit
+            self.onPickerDismiss = onPickerDismiss
         }
 
-        /// Wire the parent's `controller.commit(name:)` to a closure
-        /// that mutates the live NSTextView. Done in `makeNSView` and
-        /// re-done in `updateNSView` because the SwiftUI struct is
-        /// transient — `parent` and `controller` get rebuilt on each
-        /// render, but `textView` and `Coordinator` persist.
-        func installCommitHandler() {
-            parent.controller.commitMention = { [weak self] name in
+        func update(
+            text: Binding<String>,
+            activeQuery: Binding<String?>,
+            pickerActive: Bool,
+            onSend: @escaping () -> Void,
+            onPickerNavigate: @escaping (Int) -> Void,
+            onPickerCommit: @escaping () -> Void,
+            onPickerDismiss: @escaping () -> Void,
+            controller: MentionTextController
+        ) {
+            self.textBinding = text
+            self.activeQueryBinding = activeQuery
+            self.pickerActive = pickerActive
+            self.onSend = onSend
+            self.onPickerNavigate = onPickerNavigate
+            self.onPickerCommit = onPickerCommit
+            self.onPickerDismiss = onPickerDismiss
+            installCommitHandler(controller: controller)
+        }
+
+        /// Wire `controller.commit(name:)` to a closure that mutates
+        /// the live NSTextView. Called from `makeNSView` and re-called
+        /// from `updateNSView` because the SwiftUI struct is transient —
+        /// the controller reference gets rebuilt on each render, but
+        /// `textView` and `Coordinator` persist.
+        func installCommitHandler(controller: MentionTextController) {
+            controller.commitMention = { [weak self] name in
                 self?.commit(mention: name)
             }
         }
@@ -167,7 +224,7 @@ struct MentionTextView: NSViewRepresentable {
             // Push text back to SwiftUI binding before re-evaluating
             // the mention query, so a subsequent `updateNSView` finds
             // the strings already in sync.
-            parent.text = tv.string
+            textBinding.wrappedValue = tv.string
             updateMentionQuery(in: tv)
         }
 
@@ -180,8 +237,8 @@ struct MentionTextView: NSViewRepresentable {
             let body = tv.string
             let caret = tv.selectedRange().location
             let q = MentionQueryScanner.scan(body: body, caretUTF16: caret)
-            if q != parent.activeQuery {
-                parent.activeQuery = q
+            if q != activeQueryBinding.wrappedValue {
+                activeQueryBinding.wrappedValue = q
             }
         }
 
@@ -192,20 +249,20 @@ struct MentionTextView: NSViewRepresentable {
             // Esc dismisses. Without this interception arrow keys
             // would move the text caret instead of moving picker
             // selection.
-            if parent.pickerActive {
+            if pickerActive {
                 switch commandSelector {
                 case #selector(NSResponder.moveUp(_:)):
-                    parent.onPickerNavigate(-1)
+                    onPickerNavigate(-1)
                     return true
                 case #selector(NSResponder.moveDown(_:)):
-                    parent.onPickerNavigate(+1)
+                    onPickerNavigate(+1)
                     return true
                 case #selector(NSResponder.insertTab(_:)),
                      #selector(NSResponder.insertNewline(_:)):
-                    parent.onPickerCommit()
+                    onPickerCommit()
                     return true
                 case #selector(NSResponder.cancelOperation(_:)):
-                    parent.onPickerDismiss()
+                    onPickerDismiss()
                     return true
                 default:
                     break
@@ -218,7 +275,7 @@ struct MentionTextView: NSViewRepresentable {
             // default is U+2028, which round-trips fine but reads
             // poorly in any debug log of the inner JSON).
             if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-                parent.onSend()
+                onSend()
                 return true
             }
             if commandSelector == #selector(NSResponder.insertLineBreak(_:)) {
@@ -251,8 +308,8 @@ struct MentionTextView: NSViewRepresentable {
             tv.shouldChangeText(in: tokenRange, replacementString: replacement)
             tv.replaceCharacters(in: tokenRange, with: replacement)
             tv.didChangeText()
-            parent.text = tv.string
-            parent.activeQuery = nil
+            textBinding.wrappedValue = tv.string
+            activeQueryBinding.wrappedValue = nil
         }
     }
 }

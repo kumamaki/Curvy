@@ -35,7 +35,7 @@ struct Invite: Codable, Equatable, Sendable {
         case notBase64
         case malformedJSON
         case unsupportedVersion(Int)
-        case missingFields
+        case emptyRequiredFields
         case invalidRoomKey
 
         var description: String { userFacing }
@@ -45,7 +45,7 @@ struct Invite: Codable, Equatable, Sendable {
             case .notBase64: "That doesn't look like an invite — paste the full base64 string."
             case .malformedJSON: "The invite is corrupted. Ask kumamaki for a fresh one."
             case .unsupportedVersion(let v): "This invite is version \(v); this app only understands version \(currentVersion)."
-            case .missingFields: "The invite is missing required fields."
+            case .emptyRequiredFields: "The invite is missing required fields."
             case .invalidRoomKey: "The room key in this invite isn't a valid 32-byte base64 string."
             }
         }
@@ -74,7 +74,7 @@ struct Invite: Codable, Equatable, Sendable {
         guard !invite.token.isEmpty,
               !invite.owner.isEmpty,
               !invite.repo.isEmpty else {
-            throw DecodeError.missingFields
+            throw DecodeError.emptyRequiredFields
         }
         guard let key = invite.roomKeyData, key.count == 32 else {
             throw DecodeError.invalidRoomKey
@@ -82,10 +82,10 @@ struct Invite: Codable, Equatable, Sendable {
         return invite
     }
 
-    /// Encode to the wire form. Used by `mint-invite.sh` callers and
-    /// in tests; not used in the running app.
+    #if DEBUG
     func encode() throws -> String {
         let json = try JSONEncoder().encode(self)
         return json.base64EncodedString()
     }
+    #endif
 }
