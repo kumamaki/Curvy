@@ -36,7 +36,8 @@ final class BlobFetcher {
     /// cache files trigger a re-fetch the next time the user opens the
     /// chat. Created lazily on first write.
     static var cacheDirectory: URL {
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
         return caches.appending(path: "dev.kumamaki.Curvy/blobs", directoryHint: .isDirectory)
     }
 

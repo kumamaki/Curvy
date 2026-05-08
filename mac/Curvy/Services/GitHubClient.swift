@@ -22,18 +22,25 @@ struct GitHubClient: Sendable {
 
     enum GitHubError: Error, CustomStringConvertible {
         case http(Int, String)
+        case unauthorized
+        case rateLimited(retryAfter: TimeInterval?)
         case decoding(any Error)
         case invalidResponse
+        case invalidURL
         case contentTooLargeForInline
 
         var description: String {
             switch self {
-            case .http(let code, _) where code == 401: "the token isn't valid (HTTP 401)"
             case .http(let code, _) where code == 403: "the token can't access this repo (HTTP 403)"
             case .http(let code, _) where code == 404: "the repo doesn't exist or the token can't see it (HTTP 404)"
             case .http(let code, let body): "HTTP \(code): \(body)"
+            case .unauthorized: "the token isn't valid (HTTP 401)"
+            case .rateLimited(let after):
+                if let after { "rate limited — retry after \(Int(after))s" }
+                else { "rate limited" }
             case .decoding(let err): "couldn't decode GitHub's response (\(err))"
             case .invalidResponse: "GitHub returned a non-HTTP response"
+            case .invalidURL: "could not construct a valid request URL"
             case .contentTooLargeForInline: "Contents API returned no inline content (file >1 MB) — caller must fall back to Git Blobs API"
             }
         }
@@ -67,7 +74,7 @@ struct GitHubClient: Sendable {
 
     private let transport: Transport
 
-    init(transport: @escaping Transport = { try await URLSession.shared.data(for: $0) }) {
+    init(transport: @escaping Transport = { try await GitHubClient.session.data(for: $0) }) {
         self.transport = transport
     }
 
@@ -77,7 +84,7 @@ struct GitHubClient: Sendable {
     /// 200 response means the token works and has access to the repo —
     /// exactly what onboarding needs to confirm.
     func verifyAccess(invite: Invite) async throws {
-        let request = authenticatedRequest(
+        let request = try authenticatedRequest(
             path: "/repos/\(invite.owner)/\(invite.repo)",
             token: invite.token
         )
@@ -99,7 +106,7 @@ struct GitHubClient: Sendable {
             let style = Date.ISO8601FormatStyle()
             query.append(URLQueryItem(name: "since", value: since.formatted(style)))
         }
-        let request = authenticatedRequest(
+        let request = try authenticatedRequest(
             path: "/repos/\(invite.owner)/\(invite.repo)/issues/\(issue)/comments",
             queryItems: query,
             token: invite.token
@@ -117,8 +124,8 @@ struct GitHubClient: Sendable {
     /// `IssueComment` so callers can capture the assigned ID for local
     /// caching without a follow-up GET.
     func postComment(invite: Invite, issue: Int = 1, body: String) async throws -> IssueComment {
-        let payload = try JSONEncoder().encode(["body": body])
-        let request = authenticatedRequest(
+        let payload = try Self.encoder.encode(["body": body])
+        let request = try authenticatedRequest(
             path: "/repos/\(invite.owner)/\(invite.repo)/issues/\(issue)/comments",
             method: "POST",
             body: payload,
@@ -175,7 +182,7 @@ struct GitHubClient: Sendable {
             body["branch"] = branch
         }
         let payload = try JSONSerialization.data(withJSONObject: body)
-        let request = authenticatedRequest(
+        let request = try authenticatedRequest(
             path: "/repos/\(invite.owner)/\(invite.repo)/contents/\(path)",
             method: "PUT",
             body: payload,
@@ -224,7 +231,7 @@ struct GitHubClient: Sendable {
         if let branch {
             query.append(URLQueryItem(name: "ref", value: branch))
         }
-        let request = authenticatedRequest(
+        let request = try authenticatedRequest(
             path: "/repos/\(invite.owner)/\(invite.repo)/contents/\(path)",
             queryItems: query,
             token: invite.token
@@ -266,7 +273,7 @@ struct GitHubClient: Sendable {
     /// strip the wrapping and decode. Goes through `api.github.com`,
     /// the only GitHub host we rely on.
     func getBlob(invite: Invite, sha: String) async throws -> Data {
-        let request = authenticatedRequest(
+        let request = try authenticatedRequest(
             path: "/repos/\(invite.owner)/\(invite.repo)/git/blobs/\(sha)",
             token: invite.token
         )
@@ -320,7 +327,7 @@ struct GitHubClient: Sendable {
             body["branch"] = branch
         }
         let payload = try JSONSerialization.data(withJSONObject: body)
-        let request = authenticatedRequest(
+        let request = try authenticatedRequest(
             path: "/repos/\(invite.owner)/\(invite.repo)/contents/\(path)",
             method: "DELETE",
             body: payload,
@@ -341,8 +348,17 @@ struct GitHubClient: Sendable {
             throw GitHubError.invalidResponse
         }
         guard (200..<300).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw GitHubError.http(http.statusCode, body)
+            switch http.statusCode {
+            case 401:
+                throw GitHubError.unauthorized
+            case 429:
+                let retryAfter = (http.value(forHTTPHeaderField: "Retry-After"))
+                    .flatMap { TimeInterval($0) }
+                throw GitHubError.rateLimited(retryAfter: retryAfter)
+            default:
+                let body = String(data: data, encoding: .utf8) ?? ""
+                throw GitHubError.http(http.statusCode, body)
+            }
         }
         return data
     }
@@ -353,12 +369,17 @@ struct GitHubClient: Sendable {
         method: String = "GET",
         body: Data? = nil,
         token: String
-    ) -> URLRequest {
-        var components = URLComponents(string: "https://api.github.com\(path)")!
+    ) throws -> URLRequest {
+        guard var components = URLComponents(string: "https://api.github.com\(path)") else {
+            throw GitHubError.invalidURL
+        }
         if !queryItems.isEmpty {
             components.queryItems = queryItems
         }
-        var request = URLRequest(url: components.url!)
+        guard let url = components.url else {
+            throw GitHubError.invalidURL
+        }
+        var request = URLRequest(url: url)
         request.httpMethod = method
         request.httpBody = body
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
@@ -370,11 +391,20 @@ struct GitHubClient: Sendable {
         return request
     }
 
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 15
+        config.waitsForConnectivity = true
+        return URLSession(configuration: config)
+    }()
+
     private static let decoder: JSONDecoder = {
         let d = JSONDecoder()
         d.keyDecodingStrategy = .convertFromSnakeCase
         d.dateDecodingStrategy = .iso8601
         return d
     }()
+
+    private static let encoder = JSONEncoder()
 }
 

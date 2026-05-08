@@ -60,7 +60,7 @@ struct ReactionPicker: View {
         }
         .padding(8)
         .glassEffect(.regular, in: .rect(cornerRadius: 22))
-        .task { stagger() }
+        .task { await stagger() }
     }
 
     /// Reveal each emoji button ~12ms after the previous one. With
@@ -68,15 +68,20 @@ struct ReactionPicker: View {
     /// 25ms — at 25ms total reveal is ~450ms, which feels sluggish
     /// for a tapback. 12ms × 18 = ~215ms total: fast enough to feel
     /// instant, slow enough that the eye still catches the cascade.
-    private func stagger() {
+    ///
+    /// Running directly inside the `.task` closure (not in a detached
+    /// inner Task) means SwiftUI's automatic cancellation on re-appear
+    /// actually reaches the `Task.sleep` calls and stops the old
+    /// stagger before the new one begins.
+    @MainActor
+    private func stagger() async {
+        revealed = Array(repeating: false, count: Self.presets.count)
         let perStep = reduceMotion ? Duration.zero : .milliseconds(12)
-        Task { @MainActor in
-            for index in revealed.indices {
-                withAnimation(reduceMotion ? .linear(duration: 0) : .spring(response: 0.34, dampingFraction: 0.78)) {
-                    revealed[index] = true
-                }
-                try? await Task.sleep(for: perStep)
+        for index in revealed.indices {
+            withAnimation(reduceMotion ? .linear(duration: 0) : .spring(response: 0.34, dampingFraction: 0.78)) {
+                revealed[index] = true
             }
+            try? await Task.sleep(for: perStep)
         }
     }
 }

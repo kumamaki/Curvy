@@ -21,7 +21,11 @@ struct CurvyApp: App {
     init() {
         let container: ModelContainer
         do {
-            container = try ModelContainer(for: CachedMessage.self)
+            container = try ModelContainer(
+                for: Schema([CachedMessage.self]),
+                migrationPlan: CachedMessageMigrationPlan.self,
+                configurations: [ModelConfiguration()]
+            )
         } catch {
             fatalError("Could not create ModelContainer for CachedMessage: \(error)")
         }
@@ -44,6 +48,7 @@ struct CurvyApp: App {
                     notificationDelegate.onReply = { [messages] text, replyTo in
                         try? await messages.send(text: text, replyTo: replyTo)
                     }
+                    async let _ = Notifier.live.requestAuthorization()
                     await session.bootstrap()
                 }
                 .task(id: session.currentInvite?.token) {

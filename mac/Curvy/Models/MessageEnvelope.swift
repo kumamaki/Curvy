@@ -65,7 +65,7 @@ struct MessageEnvelope: Codable, Sendable, Equatable {
         }
         let envelope: MessageEnvelope
         do {
-            envelope = try JSONDecoder().decode(MessageEnvelope.self, from: json)
+            envelope = try Self.decoder.decode(MessageEnvelope.self, from: json)
         } catch {
             throw DecodeError.malformedJSON
         }
@@ -84,8 +84,11 @@ struct MessageEnvelope: Codable, Sendable, Equatable {
     /// Encode to the outer base64 string that gets posted as the
     /// comment body. Inverse of `decode(_:)`.
     func encodeForWire() throws -> String {
-        let json = try JSONEncoder().encode(self)
+        let json = try Self.encoder.encode(self)
         return json.base64EncodedString()
     }
+
+    private static let decoder = JSONDecoder()
+    private static let encoder = JSONEncoder()
 }
 

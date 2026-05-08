@@ -112,18 +112,8 @@ struct ChatView: View {
                     .help("Sign out")
                 }
             }
-            // The initial mark-read + auth prompt fire once when the
-            // chat first becomes visible. `.task` is one-shot per view
-            // identity, which is exactly what we want — re-onboarding
-            // remounts ChatView so both re-run (markRead is cheap;
-            // auth is a no-op once the user has answered).
-            //
-            // markRead first so the dock badge clears immediately on
-            // app open regardless of how long the user takes to
-            // dismiss the auth dialog.
             .task {
                 store.markRead()
-                _ = await Notifier.live.requestAuthorization()
             }
             // Window regaining focus is the canonical "user is reading
             // again" signal. Bumps the watermark, clears the badge,
