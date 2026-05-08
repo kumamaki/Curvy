@@ -1,6 +1,20 @@
 import Foundation
 import SwiftData
 
+// MARK: - Versioned Schema
+
+enum CachedMessageSchemaV1: VersionedSchema {
+    static let versionIdentifier = Schema.Version(1, 0, 0)
+    static var models: [any PersistentModel.Type] { [CachedMessage.self] }
+}
+
+enum CachedMessageMigrationPlan: SchemaMigrationPlan {
+    static var schemas: [any VersionedSchema.Type] { [CachedMessageSchemaV1.self] }
+    static var stages: [MigrationStage] { [] }
+}
+
+// MARK: - Model
+
 /// One message in the room, persisted locally so it survives app
 /// restart and so the UI can render via `@Query` without re-fetching
 /// from GitHub on every launch.
