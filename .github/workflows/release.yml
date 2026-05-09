@@ -51,15 +51,13 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychain -d user -s "$KEYCHAIN_PATH"
 
-      - name: Build, sign, notarize, and staple DMG
+      - name: Build DMG (signing disabled — re-enable after accepting Apple agreement)
         env:
           OUT_DMG: dist/Curvy-${{ steps.version.outputs.version }}.dmg
           VOLNAME: Curvy ${{ steps.version.outputs.version }}
           MARKETING_VERSION: ${{ steps.version.outputs.version }}
           CURRENT_PROJECT_VERSION: ${{ steps.version.outputs.version }}
-          NOTARIZATION_APPLE_ID: ${{ secrets.NOTARIZATION_APPLE_ID }}
-          NOTARIZATION_TEAM_ID: ${{ vars.NOTARIZATION_TEAM_ID }}
-          NOTARIZATION_PASSWORD: ${{ secrets.NOTARIZATION_PASSWORD }}
+          CODE_SIGN: "no"
         run: ./scripts/build-dmg.sh
 
       - name: Fetch canonical appcast from releases branch
