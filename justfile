@@ -76,10 +76,9 @@ package:
 # === Release ================================================================
 
 # Bump the latest v* tag (major | minor | patch) and push it. The GitHub Action
-# builds the DMG and attaches it to the release. Requires a clean working tree.
+# builds the DMG and attaches it to the release. Always tags origin/main —
+# safe to run from any branch, including gitbutler/workspace.
 # First-ever release uses v0.0.0 as the base, so `just ship patch` → v0.0.1.
-#
-# Bump the latest v-tag, push, and trigger the release workflow.
 ship kind:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -87,15 +86,17 @@ ship kind:
       major|minor|patch) ;;
       *) echo "usage: just ship <major|minor|patch>"; exit 1 ;;
     esac
-    if [ -n "$(git status --porcelain)" ]; then
-      echo "working tree is dirty — commit or stash first"
-      exit 1
-    fi
-    git fetch --tags --quiet
+    git fetch origin main --tags --quiet
+    target=$(git rev-parse origin/main)
     latest=$(git tag --list 'v*' --sort=-version:refname | head -1)
     latest=${latest:-v0.0.0}
     if ! [[ "${latest#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
       echo "latest tag <${latest}> is not vX.Y.Z — fix manually"
+      exit 1
+    fi
+    if git rev-parse -q --verify "refs/tags/${latest}" >/dev/null \
+       && [ "$(git rev-parse "${latest}^{commit}")" = "${target}" ]; then
+      echo "origin/main is already tagged ${latest} — land new commits before shipping"
       exit 1
     fi
     IFS=. read -r major minor patch <<< "${latest#v}"
@@ -106,13 +107,14 @@ ship kind:
     esac
     new="v${major}.${minor}.${patch}"
     echo "==> bumping {{kind}}: ${latest} → ${new}"
+    echo "    target: origin/main @ $(git log -1 --format='%h %s' "${target}")"
     echo
     read -r -p "Push ${new} now? [y/N] " reply
     case "$reply" in
       y|Y|yes|YES) ;;
       *) echo "ship: aborted." >&2; exit 1 ;;
     esac
-    git tag -a "${new}" -m "Release ${new}"
+    git tag -a "${new}" -m "Release ${new}" "${target}"
     git push origin "${new}"
     echo "tagged ${new} — workflow:"
     open https://github.com/kumamaki/Curvy/actions
