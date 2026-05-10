@@ -120,15 +120,6 @@ struct MessageComposer: View {
         ) { result in
             handleFileImporterResult(result)
         }
-        // .onPasteCommand only fires when the pasteboard contains one
-        // of the listed UTTypes — text pastes don't trigger this, so
-        // the text field still handles ⌘V for typed content. Note we
-        // list png/jpeg/tiff/heic explicitly because `.image` is an
-        // abstract UTType and some clipboard sources advertise only
-        // a concrete subtype.
-        .onPasteCommand(of: [.image, .png, .jpeg, .tiff, .heic, .gif]) { providers in
-            onLoadProviders(providers)
-        }
     }
 
     private var replyBannerTransition: AnyTransition {
@@ -181,7 +172,8 @@ struct MessageComposer: View {
             onSend: handleReturnSend,
             onPickerNavigate: navigatePicker,
             onPickerCommit: commitPickerSelection,
-            onPickerDismiss: dismissPicker
+            onPickerDismiss: dismissPicker,
+            onPasteImage: onLoadProviders
         )
         .frame(height: draftHeight)
         .padding(.horizontal, 14)

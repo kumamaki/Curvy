@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// `NSTextView` wrapped for SwiftUI use in the chat composer. Replaces
 /// the previous `TextField(axis: .vertical)` because @-mention detection
@@ -44,6 +45,12 @@ struct MentionTextView: NSViewRepresentable {
     let onPickerNavigate: (Int) -> Void
     let onPickerCommit: () -> Void
     let onPickerDismiss: () -> Void
+    /// Called when ⌘V hits the text view with image data on the
+    /// pasteboard. Routed up to `ChatView.handleProviders` so the
+    /// existing GIF/NSImage/file-URL pipeline handles it. When the
+    /// pasteboard has no image, the override falls through to
+    /// `super.paste(_:)` and this is never invoked.
+    let onPasteImage: ([NSItemProvider]) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -89,6 +96,7 @@ struct MentionTextView: NSViewRepresentable {
         textView.string = text
         textView.placeholder = placeholder
 
+        textView.onPasteImage = onPasteImage
         scrollView.documentView = textView
         context.coordinator.textView = textView
         context.coordinator.installCommitHandler(controller: controller)
@@ -97,6 +105,11 @@ struct MentionTextView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? MentionNSTextView else { return }
+        // Re-assign on every render so the closure captures the freshest
+        // SwiftUI state. The struct is rebuilt each render; the closure
+        // it carries is too. Without this re-assignment the text view
+        // would keep calling a stale closure from the first render.
+        textView.onPasteImage = onPasteImage
         context.coordinator.update(
             text: $text,
             activeQuery: $activeQuery,
@@ -396,6 +409,84 @@ final class MentionTextController {
 final class MentionNSTextView: NSTextView {
     var placeholder: String = "" {
         didSet { needsDisplay = true }
+    }
+
+    /// Set by the SwiftUI wrapper. Called from the overridden `paste(_:)`
+    /// when the pasteboard carries image data — routes up to the
+    /// composer so the existing image pipeline handles the bytes.
+    var onPasteImage: (([NSItemProvider]) -> Void)?
+
+    /// Intercept ⌘V before `NSTextView`'s default paste reads the
+    /// pasteboard's `.string` representation (which, for images, is
+    /// the source file's path — that's the bug we're fixing).
+    ///
+    /// Decision tree:
+    ///   1. If the pasteboard has a file URL pointing at an image,
+    ///      route the URL through `onPasteImage` and stop. We do this
+    ///      *before* checking inline image bytes because Finder's
+    ///      Copy on an image file puts the file's *icon* on the
+    ///      pasteboard as TIFF — without this guard we'd attach a
+    ///      32-pixel icon instead of the actual image.
+    ///   2. Else, scan for inline image data (PNG, HEIC, JPEG, GIF,
+    ///      TIFF) in priority order and route the first match.
+    ///   3. Else, fall through to `super.paste(_:)` so plain text
+    ///      paste still works.
+    override func paste(_ sender: Any?) {
+        let pb = NSPasteboard.general
+
+        if let provider = imageFileURLProvider(from: pb) {
+            onPasteImage?([provider])
+            return
+        }
+
+        if let provider = inlineImageProvider(from: pb) {
+            onPasteImage?([provider])
+            return
+        }
+
+        super.paste(sender)
+    }
+
+    /// Builds an `NSItemProvider` from a file-URL on the pasteboard
+    /// when that URL points at an image file. Returns `nil` when the
+    /// pasteboard has no file URL or the file isn't an image.
+    private func imageFileURLProvider(from pb: NSPasteboard) -> NSItemProvider? {
+        guard let urlData = pb.data(forType: .fileURL),
+              let url = URL(dataRepresentation: urlData, relativeTo: nil),
+              let fileType = UTType(filenameExtension: url.pathExtension),
+              fileType.conforms(to: .image)
+        else { return nil }
+
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(
+            forTypeIdentifier: UTType.fileURL.identifier,
+            visibility: .all
+        ) { completion in
+            completion(url.dataRepresentation, nil)
+            return nil
+        }
+        return provider
+    }
+
+    /// Builds an `NSItemProvider` wrapping inline image bytes from the
+    /// pasteboard. GIF wins over raster types so animated frames are
+    /// preserved — same priority order as `ChatView.handleProviders`.
+    private func inlineImageProvider(from pb: NSPasteboard) -> NSItemProvider? {
+        let priority: [UTType] = [.gif, .png, .heic, .jpeg, .tiff]
+        for type in priority {
+            let pbType = NSPasteboard.PasteboardType(type.identifier)
+            guard let data = pb.data(forType: pbType) else { continue }
+            let provider = NSItemProvider()
+            provider.registerDataRepresentation(
+                forTypeIdentifier: type.identifier,
+                visibility: .all
+            ) { completion in
+                completion(data, nil)
+                return nil
+            }
+            return provider
+        }
+        return nil
     }
 
     override func draw(_ dirtyRect: NSRect) {
