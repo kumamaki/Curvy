@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "instruments-analyzer": {
+      "source": "jlreyes/instruments-analyzer",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "a79e6146cc04498ef35f44a9ada18a71f7f265bd4ff9d1644bd404a2b232e3b8"
+    }
+  }
+}
