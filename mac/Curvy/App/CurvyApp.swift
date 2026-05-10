@@ -9,14 +9,8 @@ struct CurvyApp: App {
     @State private var messages: MessageStore
     @State private var notificationDelegate = NotificationDelegate()
     private let modelContainer: ModelContainer
-    // Sparkle: must be a stored `let` — discarding this stops the updater.
-    // Unsigned builds (CI) can check and prompt but cannot auto-install
-    // because the sandbox XPC handoff requires a signed host app.
-    private let updaterController = SPUStandardUpdaterController(
-        startingUpdater: true,
-        updaterDelegate: nil,
-        userDriverDelegate: nil
-    )
+    // Must be a stored `@State` — Sparkle stops the updater if this is released.
+    @State private var updateMonitor = UpdateMonitor()
 
     init() {
         let container: ModelContainer
@@ -38,6 +32,7 @@ struct CurvyApp: App {
             RootView()
                 .environment(session)
                 .environment(messages)
+                .environment(updateMonitor)
                 .modelContainer(modelContainer)
                 .tint(Color.curvyBrand)
                 .frame(minWidth: 520, minHeight: 480)
@@ -65,7 +60,7 @@ struct CurvyApp: App {
         .commands {
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") {
-                    updaterController.updater.checkForUpdates()
+                    updateMonitor.checkForUpdates()
                 }
             }
             CommandGroup(before: .appTermination) {
