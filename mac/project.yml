@@ -44,10 +44,6 @@ targets:
         SUEnableAutomaticChecks: true
     entitlements:
       path: Curvy/Resources/Curvy.entitlements
-      properties:
-        com.apple.security.app-sandbox: true
-        com.apple.security.network.client: true
-        com.apple.security.files.user-selected.read-write: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.kumamaki.Curvy

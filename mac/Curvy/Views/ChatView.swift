@@ -15,6 +15,7 @@ import UniformTypeIdentifiers
 struct ChatView: View {
     @Environment(SessionStore.self) private var session
     @Environment(MessageStore.self) private var store
+    @Environment(UpdateMonitor.self) private var updateMonitor
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     @Query(sort: \CachedMessage.createdAt) private var messages: [CachedMessage]
@@ -428,9 +429,14 @@ struct ChatView: View {
         .task { await fallbackReveal() }
         .task(id: highlightedID) { await clearHighlightAfterDelay() }
         .overlay(alignment: .bottom) { jumpToLatestOverlay }
+        .overlay(alignment: .top) { updateAvailableOverlay }
         .animation(
             reduceMotion ? .linear(duration: 0) : .spring(response: 0.32, dampingFraction: 0.85),
             value: pillVisible
+        )
+        .animation(
+            reduceMotion ? .linear(duration: 0) : .spring(response: 0.3, dampingFraction: 0.78),
+            value: updateMonitor.updateAvailable
         )
     }
 
@@ -441,6 +447,15 @@ struct ChatView: View {
     /// already-long modifier chain.
     private var pillVisible: Bool {
         !isPinnedToBottom && unreadInScrollback > 0
+    }
+
+    @ViewBuilder
+    private var updateAvailableOverlay: some View {
+        if updateMonitor.updateAvailable {
+            UpdateAvailablePill { updateMonitor.checkForUpdates() }
+                .padding(.top, 0)
+                .transition(.move(edge: .top).combined(with: .opacity))
+        }
     }
 
     /// Floating chip that appears in scrollback when new bubbles
@@ -833,6 +848,32 @@ private struct ScrollEdgeState: Equatable {
     let atBottomTight: Bool
     let atBottomLoose: Bool
     let nearTop: Bool
+}
+
+/// Toolbar pill that appears on the right when Sparkle reports a new
+/// version. Tapping triggers the standard Sparkle update sheet.
+private struct UpdateAvailablePill: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.down.circle.fill")
+                    .imageScale(.medium)
+                Text("Update available")
+                    .font(.subheadline)
+                    .fontWeight(.light)
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 9)
+            .background(Color.accentColor, in: .capsule)
+            .overlay(Capsule().strokeBorder(.white.opacity(0.18), lineWidth: 0.5))
+            .shadow(color: Color.accentColor.opacity(0.25), radius: 4, y: 1)
+            .contentShape(.capsule)
+        }
+        .buttonStyle(.plain)
+    }
 }
 
 /// Floating "↓ N new" chip that appears near the bottom edge of the
