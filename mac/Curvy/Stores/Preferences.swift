@@ -22,6 +22,7 @@ import Observation
 final class Preferences {
     private static let displayNameKey = "DisplayName"
     private static let lastReadCreatedAtKey = "LastReadCreatedAt"
+    private static let oldestPageFetchedKey = "OldestPageFetched"
 
     @ObservationIgnored private let defaults: UserDefaults
 
@@ -48,6 +49,20 @@ final class Preferences {
         }
     }
 
+    /// Tracks how far back history has been loaded from GitHub.
+    ///   0  = never seeded (first-ever launch)
+    ///   1  = page 1 already fetched — fully loaded, nothing older
+    ///   N  = oldest page fetched so far; pages 1..(N-1) still exist on GitHub
+    ///
+    /// Page numbering with `perPage = 50` is stable: new messages always
+    /// append to the end, so page 1 is always the oldest 50 messages
+    /// regardless of how many arrive later.
+    var oldestPageFetched: Int {
+        didSet {
+            defaults.set(oldestPageFetched, forKey: Self.oldestPageFetchedKey)
+        }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         if let stored = defaults.string(forKey: Self.displayNameKey), !stored.isEmpty {
@@ -56,6 +71,7 @@ final class Preferences {
             self.displayName = NSFullUserName()
         }
         self.lastReadCreatedAt = defaults.object(forKey: Self.lastReadCreatedAtKey) as? Date
+        self.oldestPageFetched = defaults.integer(forKey: Self.oldestPageFetchedKey)
     }
 }
 

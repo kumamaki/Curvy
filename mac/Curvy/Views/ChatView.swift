@@ -68,6 +68,10 @@ struct ChatView: View {
     // transiently flipping isPinnedToBottom to false mid-animation,
     // which would miscount a concurrent new message as unread.
     @State private var isProgrammaticallyScrolling: Bool = false
+    // Set just before triggering `loadOlderMessages()` to the ID of the
+    // top-most visible row. After the prepend lands, `onChange` scrolls
+    // back to this row so the user's reading position stays stable.
+    @State private var needsScrollRestoreID: PersistentIdentifier?
 
     /// Shared namespace for the reaction "stick" animation. Picker
     /// emojis publish a matched-geometry source keyed by
@@ -337,6 +341,11 @@ struct ChatView: View {
     private var messageList: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
+                if store.isLoadingOlderMessages {
+                    ProgressView()
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                }
                 ForEach(cachedRows) { row in
                     MessageRow(
                         message: row.message,
@@ -393,17 +402,28 @@ struct ChatView: View {
             handleLastBubbleChange(newID)
         }
         .onChange(of: messages.map(\.id), initial: true) { _, _ in
+            let anchorID = needsScrollRestoreID
             cachedRows = buildRows()
             cachedKnownSenders = knownSenders
+            // After loading older messages, scroll back to where the
+            // user was so the newly-prepended rows appear above them.
+            if let anchorID, cachedRows.contains(where: { $0.id == anchorID }) {
+                needsScrollRestoreID = nil
+                var t = Transaction()
+                t.disablesAnimations = true
+                withTransaction(t) {
+                    scrollPosition.scrollTo(id: anchorID, anchor: .top)
+                }
+            }
         }
         .onChange(of: store.displayName) { _, _ in
             cachedRows = buildRows()
             cachedKnownSenders = knownSenders
         }
-        .onScrollGeometryChange(for: BottomState.self) { geometry in
-            bottomState(geometry)
+        .onScrollGeometryChange(for: ScrollEdgeState.self) { geometry in
+            scrollEdgeState(geometry)
         } action: { _, snap in
-            handleBottomState(snap)
+            handleScrollEdgeState(snap)
         }
         .task { await fallbackReveal() }
         .task(id: highlightedID) { await clearHighlightAfterDelay() }
@@ -438,15 +458,16 @@ struct ChatView: View {
         }
     }
 
-    /// Geometry → `BottomState` projection. Single tick produces both
-    /// the tight (1pt) bottom check used for the first-reveal gate
-    /// and the loose (80pt) bottom check used for the auto-follow gate.
-    private func bottomState(_ geometry: ScrollGeometry) -> BottomState {
+    /// Geometry → `ScrollEdgeState` projection. Single tick produces the
+    /// tight (1pt) and loose (80pt) bottom checks plus a near-top (100pt)
+    /// check that triggers history loading.
+    private func scrollEdgeState(_ geometry: ScrollGeometry) -> ScrollEdgeState {
         let gap = geometry.contentSize.height
             - (geometry.contentOffset.y + geometry.containerSize.height)
-        return BottomState(
+        return ScrollEdgeState(
             atBottomTight: gap <= 1,
-            atBottomLoose: gap <= 80
+            atBottomLoose: gap <= 80,
+            nearTop: geometry.contentOffset.y < 100
         )
     }
 
@@ -494,7 +515,7 @@ struct ChatView: View {
     ///     `isPinnedToBottom`. Loose threshold so a few pixels of
     ///     give don't kick the user out of pinned state.
     ///   - unread reset — returning to the bottom clears the pill.
-    private func handleBottomState(_ snap: BottomState) {
+    private func handleScrollEdgeState(_ snap: ScrollEdgeState) {
         if !didSeed, snap.atBottomTight {
             withAnimation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.18)) {
                 didSeed = true
@@ -516,6 +537,18 @@ struct ChatView: View {
         }
         if snap.atBottomLoose, unreadInScrollback != 0 {
             unreadInScrollback = 0
+        }
+        // Trigger history load when the user scrolls near the top.
+        // `needsScrollRestoreID == nil` prevents double-firing while the
+        // previous load is still in flight (restore clears it post-prepend).
+        if didSeed,
+           snap.nearTop,
+           store.hasOlderMessages,
+           !store.isLoadingOlderMessages,
+           needsScrollRestoreID == nil,
+           let anchorID = cachedRows.first?.id {
+            needsScrollRestoreID = anchorID
+            Task { await store.loadOlderMessages() }
         }
     }
 
@@ -792,13 +825,14 @@ private struct RowItem: Identifiable {
     var id: PersistentIdentifier { message.persistentModelID }
 }
 
-/// Two thresholds derived from one geometry tick so a single
-/// `.onScrollGeometryChange` handler can drive both the first-reveal
-/// gate (tight, must be flush at the bottom) and the auto-follow
-/// gate (loose, near the bottom is good enough to "follow").
-private struct BottomState: Equatable {
+/// Three thresholds derived from one geometry tick:
+///   - `atBottomTight`  — flush at bottom; gates first-reveal
+///   - `atBottomLoose`  — within 80pt; gates auto-follow and unread reset
+///   - `nearTop`        — within 100pt of top; triggers history load
+private struct ScrollEdgeState: Equatable {
     let atBottomTight: Bool
     let atBottomLoose: Bool
+    let nearTop: Bool
 }
 
 /// Floating "↓ N new" chip that appears near the bottom edge of the
