@@ -34,6 +34,12 @@ final class MessageStore {
     }
 
     private(set) var status: Status = .idle
+    /// True when pages of history older than the initial seed still
+    /// exist on GitHub. Drives the top-of-list spinner in ChatView.
+    private(set) var hasOlderMessages: Bool = false
+    /// True while `loadOlderMessages()` is running. ChatView uses this
+    /// to show a spinner and prevent double-triggering on scroll.
+    private(set) var isLoadingOlderMessages: Bool = false
 
     /// Number of cached, well-formed messages from someone other than
     /// the current user with `createdAt` strictly newer than the
@@ -55,6 +61,8 @@ final class MessageStore {
     @ObservationIgnored private let notifier: Notifier
     @ObservationIgnored private let isFocused: @MainActor () -> Bool
     @ObservationIgnored private let logger = Logger(subsystem: "dev.kumamaki.Curvy", category: "MessageStore")
+
+    @ObservationIgnored private let historyPerPage = 50
 
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var currentInvite: Invite?
@@ -112,8 +120,16 @@ final class MessageStore {
         }
         refreshUnread()
 
+        // If the cache was wiped (e.g. nuke-keychain) but UserDefaults
+        // still has a stale page cursor, reset so the seed reruns.
+        if preferences.oldestPageFetched > 0 && latestCreatedAt() == nil {
+            preferences.oldestPageFetched = 0
+        }
+        hasOlderMessages = preferences.oldestPageFetched > 1
+
         if beginPolling {
             pollTask = Task { [weak self] in
+                await self?.seedInitialHistoryIfNeeded()
                 await self?.runPollLoop()
             }
         }
@@ -129,6 +145,8 @@ final class MessageStore {
         consecutiveErrors = 0
         status = .idle
         unreadCount = 0
+        hasOlderMessages = false
+        isLoadingOlderMessages = false
         notifiedCommentIDs.removeAll()
         notifier.setBadge(nil)
         notifier.clearDelivered()
@@ -488,46 +506,108 @@ final class MessageStore {
         do {
             let since = pollCursor()
             let comments = try await github.listComments(invite: invite, since: since)
-
-            // Decrypt all comments concurrently off the main thread.
-            // RoomCrypto and MessageEnvelope are Sendable — safe to capture
-            // across the task boundary. We capture only value types here.
-            let localCrypto = crypto
-            let decrypted: [(GitHubClient.IssueComment, MessagePayload)] = await withTaskGroup(
-                of: (GitHubClient.IssueComment, MessagePayload)?.self
-            ) { group in
-                for comment in comments {
-                    group.addTask {
-                        guard let envelope = try? MessageEnvelope.decode(comment.body),
-                              let payload = try? localCrypto.open(envelope, with: key)
-                        else { return nil }
-                        return (comment, payload)
-                    }
-                }
-                var results: [(GitHubClient.IssueComment, MessagePayload)] = []
-                for await result in group {
-                    if let r = result { results.append(r) }
-                }
-                return results
-            }
-
-            let decryptedIDs = Set(decrypted.map { $0.0.id })
-            for (comment, payload) in decrypted {
-                ingestDecrypted(comment: comment, payload: payload, invite: invite, key: key)
-            }
-            for comment in comments where !decryptedIDs.contains(comment.id) {
-                logger.warning("dropped comment <\(comment.id, privacy: .public)>: decryption failed")
-                upsertWeird(comment: comment, error: DecryptError.failed)
-            }
-
-            try modelContext.save()
-
+            await decryptAndIngest(comments, invite: invite, key: key)
             consecutiveErrors = 0
             status = .polling
         } catch {
             consecutiveErrors += 1
             status = .error("\(error)")
         }
+    }
+
+    /// Fetch the last `historyPerPage` messages on first launch.
+    /// Runs once before the poll loop starts, so by the time the first
+    /// incremental poll fires, `pollCursor()` already has a value and
+    /// the poll only fetches messages newer than the seed.
+    private func seedInitialHistoryIfNeeded() async {
+        guard let invite = currentInvite, let key = roomKey else { return }
+        guard preferences.oldestPageFetched == 0 else { return }
+
+        do {
+            let info = try await github.issueInfo(invite: invite)
+            guard info.comments > 0 else {
+                preferences.oldestPageFetched = 1
+                hasOlderMessages = false
+                return
+            }
+            let lastPage = max(1, Int(ceil(Double(info.comments) / Double(historyPerPage))))
+            let comments = try await github.listComments(
+                invite: invite,
+                page: lastPage,
+                perPage: historyPerPage
+            )
+            await decryptAndIngest(comments, invite: invite, key: key)
+            preferences.oldestPageFetched = lastPage
+            hasOlderMessages = lastPage > 1
+        } catch {
+            logger.warning("history seed failed: \(String(describing: error), privacy: .public)")
+            // Best-effort fallback: mark as seeded at page 1 so the
+            // poll loop takes over with since:nil on the next cycle.
+            preferences.oldestPageFetched = 1
+            hasOlderMessages = false
+        }
+    }
+
+    /// Load the next older page of history and prepend it to the cache.
+    /// Called by `ChatView` when the user scrolls near the top of the list.
+    func loadOlderMessages() async {
+        guard let invite = currentInvite, let key = roomKey else { return }
+        guard !isLoadingOlderMessages, preferences.oldestPageFetched > 1 else { return }
+
+        isLoadingOlderMessages = true
+        defer { isLoadingOlderMessages = false }
+
+        let targetPage = preferences.oldestPageFetched - 1
+        do {
+            let comments = try await github.listComments(
+                invite: invite,
+                page: targetPage,
+                perPage: historyPerPage
+            )
+            await decryptAndIngest(comments, invite: invite, key: key)
+            preferences.oldestPageFetched = targetPage
+            hasOlderMessages = targetPage > 1
+        } catch {
+            logger.warning("loadOlderMessages page <\(targetPage, privacy: .public)> failed: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Decrypt `comments` concurrently off the main thread and upsert
+    /// the results into the SwiftData cache. Shared by `pollOnce`,
+    /// `seedInitialHistoryIfNeeded`, and `loadOlderMessages`.
+    private func decryptAndIngest(
+        _ comments: [GitHubClient.IssueComment],
+        invite: Invite,
+        key: Data
+    ) async {
+        let localCrypto = crypto
+        let decrypted: [(GitHubClient.IssueComment, MessagePayload)] = await withTaskGroup(
+            of: (GitHubClient.IssueComment, MessagePayload)?.self
+        ) { group in
+            for comment in comments {
+                group.addTask {
+                    guard let envelope = try? MessageEnvelope.decode(comment.body),
+                          let payload = try? localCrypto.open(envelope, with: key)
+                    else { return nil }
+                    return (comment, payload)
+                }
+            }
+            var results: [(GitHubClient.IssueComment, MessagePayload)] = []
+            for await result in group {
+                if let r = result { results.append(r) }
+            }
+            return results
+        }
+
+        let decryptedIDs = Set(decrypted.map { $0.0.id })
+        for (comment, payload) in decrypted {
+            ingestDecrypted(comment: comment, payload: payload, invite: invite, key: key)
+        }
+        for comment in comments where !decryptedIDs.contains(comment.id) {
+            logger.warning("dropped comment <\(comment.id, privacy: .public)>: decryption failed")
+            upsertWeird(comment: comment, error: DecryptError.failed)
+        }
+        try? modelContext.save()
     }
 
     private enum DecryptError: Error {

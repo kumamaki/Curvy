@@ -62,6 +62,13 @@ struct GitHubClient: Sendable {
         let updatedAt: Date
     }
 
+    /// Minimal issue metadata. Only the comment count matters here —
+    /// it lets `MessageStore` compute which page holds the latest
+    /// messages on first launch so history loads newest-first.
+    struct IssueInfo: Decodable, Sendable {
+        let comments: Int
+    }
+
     /// Result of a successful `putContent` — what the Contents API
     /// returns inside the `content` object on a create or update.
     /// We pull only the SHA (needed for later DELETE / blobs GET) and
@@ -91,14 +98,37 @@ struct GitHubClient: Sendable {
         _ = try await execute(request)
     }
 
+    /// Fetch basic metadata for an issue — specifically its comment count,
+    /// which `MessageStore` uses on first launch to compute which page
+    /// of comment history to seed from so the newest messages appear first.
+    func issueInfo(invite: Invite, issue: Int = 1) async throws -> IssueInfo {
+        let request = try authenticatedRequest(
+            path: "/repos/\(invite.owner)/\(invite.repo)/issues/\(issue)",
+            token: invite.token
+        )
+        let data = try await execute(request)
+        do {
+            return try Self.decoder.decode(IssueInfo.self, from: data)
+        } catch {
+            throw GitHubError.decoding(error)
+        }
+    }
+
     /// List comments on the room issue. Pass `since` to fetch only
-    /// comments updated after a timestamp — that's how the polling
-    /// actor stays incremental. Capped at 100 per request; pagination
-    /// via Link headers is not yet implemented because a v1 room won't
-    /// realistically deliver 100 messages between polls.
-    func listComments(invite: Invite, issue: Int = 1, since: Date? = nil) async throws -> [IssueComment] {
+    /// comments updated after a timestamp — that's how the polling loop
+    /// stays incremental. Pass `page` and `perPage` to fetch a specific
+    /// slice of history — used on first launch to seed the newest messages
+    /// and by `loadOlderMessages` to page backwards through history.
+    func listComments(
+        invite: Invite,
+        issue: Int = 1,
+        since: Date? = nil,
+        page: Int = 1,
+        perPage: Int = 100
+    ) async throws -> [IssueComment] {
         var query: [URLQueryItem] = [
-            URLQueryItem(name: "per_page", value: "100")
+            URLQueryItem(name: "per_page", value: "\(perPage)"),
+            URLQueryItem(name: "page", value: "\(page)"),
         ]
         if let since {
             // GitHub rejects fractional seconds on `since`. Default
