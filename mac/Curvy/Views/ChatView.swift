@@ -109,16 +109,6 @@ struct ChatView: View {
             )
             .navigationTitle("Curvy")
             .navigationSubtitle(statusSubtitle)
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        session.signOut()
-                    } label: {
-                        Image(systemName: "rectangle.portrait.and.arrow.right")
-                    }
-                    .help("Sign out")
-                }
-            }
             .task {
                 store.markRead()
             }

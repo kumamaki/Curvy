@@ -68,6 +68,13 @@ struct CurvyApp: App {
                     updaterController.updater.checkForUpdates()
                 }
             }
+            CommandGroup(before: .appTermination) {
+                Divider()
+                Button("Sign Out") {
+                    session.signOut()
+                }
+                .disabled(session.currentInvite == nil)
+            }
         }
         .windowToolbarStyle(.unified)
         .windowResizability(.contentMinSize)
