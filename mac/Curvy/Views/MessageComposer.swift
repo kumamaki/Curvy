@@ -126,7 +126,7 @@ struct MessageComposer: View {
         // list png/jpeg/tiff/heic explicitly because `.image` is an
         // abstract UTType and some clipboard sources advertise only
         // a concrete subtype.
-        .onPasteCommand(of: [.image, .png, .jpeg, .tiff, .heic]) { providers in
+        .onPasteCommand(of: [.image, .png, .jpeg, .tiff, .heic, .gif]) { providers in
             onLoadProviders(providers)
         }
     }

@@ -105,4 +105,33 @@ struct MessagePayloadImageTests {
         let decoded = try JSONDecoder().decode(MessagePayload.self, from: data)
         #expect(decoded == original)
     }
+
+    @Test func gifMimeRoundTripsThroughCodable() throws {
+        // GIFs reuse the .image envelope with mime "image/gif". This test
+        // guards that the mime field survives encode → decode unchanged so
+        // the renderer can branch on it reliably.
+        let gif = ImageMessage(
+            sender: "kumamaki",
+            assetPath: "blobs/animated.bin",
+            assetSha: "9e3ec56d3a2d4f8e9b1f7c5e2d8a0b3f1e6c9d4a",
+            mime: "image/gif",
+            keyB64: Data(repeating: 0x03, count: 32).base64EncodedString(),
+            nonceB64: Data(repeating: 0x04, count: 12).base64EncodedString(),
+            size: 204_800,
+            width: 480,
+            height: 270,
+            caption: nil,
+            replyTo: nil,
+            sentAt: Date(timeIntervalSince1970: 1_750_000_000)
+        )
+        let original: MessagePayload = .image(gif)
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(MessagePayload.self, from: data)
+        guard case .image(let decodedImage) = decoded else {
+            Issue.record("expected .image case after decode")
+            return
+        }
+        #expect(decodedImage.mime == "image/gif")
+        #expect(decoded == original)
+    }
 }

@@ -350,9 +350,14 @@ struct MessageRow: View {
 
                 ZStack {
                     if let nsImage = cachedImage {
-                        Image(nsImage: nsImage)
-                            .resizable()
-                            .scaledToFill()
+                        if message.imageMime == "image/gif" {
+                            AnimatedGIFView(image: nsImage)
+                                .scaledToFill()
+                        } else {
+                            Image(nsImage: nsImage)
+                                .resizable()
+                                .scaledToFill()
+                        }
                     } else {
                         Rectangle()
                             .fill(.fill.quaternary)
