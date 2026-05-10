@@ -758,10 +758,10 @@ final class MessageStore {
 
     private func pollCursor() -> Date? {
         var descriptor = FetchDescriptor<CachedMessage>(
-            sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
+            sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]
         )
         descriptor.fetchLimit = 1
-        return (try? modelContext.fetch(descriptor))?.first?.createdAt
+        return (try? modelContext.fetch(descriptor))?.first?.updatedAt
     }
 
     // MARK: - Reactions (v2)
