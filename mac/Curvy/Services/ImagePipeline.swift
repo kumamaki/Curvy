@@ -55,12 +55,29 @@ struct ImagePipeline: Sendable {
     private static let logger = Logger(subsystem: "dev.kumamaki.Curvy", category: "ImagePipeline")
 
     /// Read URL via `NSImage` and prepare. Used by NSOpenPanel + drag-
-    /// drop file URLs.
+    /// drop file URLs. GIFs are passed through as-is to preserve animation;
+    /// all other formats are normalized to JPEG.
     func prepare(url: URL) throws -> Prepared {
+        if url.pathExtension.lowercased() == "gif" {
+            let data = try Data(contentsOf: url)
+            guard let image = NSImage(contentsOf: url) else {
+                throw PipelineError.unreadable(url)
+            }
+            return try prepareGIF(rawData: data, image: image)
+        }
         guard let image = NSImage(contentsOf: url) else {
             throw PipelineError.unreadable(url)
         }
         return try prepare(image: image)
+    }
+
+    /// Prepare raw GIF bytes from a clipboard paste or item provider.
+    /// Extracts pixel dimensions from the first frame via `NSImage`.
+    func prepare(gifData: Data) throws -> Prepared {
+        guard let image = NSImage(data: gifData) else {
+            throw PipelineError.notAnImage
+        }
+        return try prepareGIF(rawData: gifData, image: image)
     }
 
     /// Prepare an in-memory `NSImage` — used for clipboard pastes (where
@@ -110,6 +127,18 @@ struct ImagePipeline: Sendable {
     }
 
     // MARK: - Internals
+
+    private func prepareGIF(rawData: Data, image: NSImage) throws -> Prepared {
+        let size = pixelSize(of: image)
+        guard size.width > 0, size.height > 0 else {
+            throw PipelineError.notAnImage
+        }
+        if rawData.count > 10 * 1024 * 1024 {
+            Self.logger.warning("gif is large: <\(rawData.count, privacy: .public)> bytes")
+        }
+        Self.logger.debug("prepared gif <\(Int(size.width), privacy: .public)x\(Int(size.height), privacy: .public)>, <\(rawData.count, privacy: .public)> bytes")
+        return Prepared(bytes: rawData, mime: "image/gif", width: Int(size.width), height: Int(size.height))
+    }
 
     /// Largest pixel dimensions across all bitmap reps the NSImage
     /// carries. NSImage caches multiple resolutions for retina; we

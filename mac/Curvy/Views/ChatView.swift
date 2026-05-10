@@ -639,6 +639,21 @@ struct ChatView: View {
     private func handleProviders(_ providers: [NSItemProvider]) {
         guard let provider = providers.first else { return }
 
+        // GIF must be intercepted before the generic NSImage check.
+        // NSImage can load GIFs but drops all frames when round-tripped
+        // through loadObject — we get a static first frame. Requesting
+        // raw bytes via loadDataRepresentation preserves the animation.
+        if provider.hasItemConformingToTypeIdentifier(UTType.gif.identifier) {
+            provider.loadDataRepresentation(forTypeIdentifier: UTType.gif.identifier) { data, error in
+                guard let data, error == nil else {
+                    DispatchQueue.main.async { shakeTrigger += 1 }
+                    return
+                }
+                DispatchQueue.main.async { preparePicked(gifData: data) }
+            }
+            return
+        }
+
         if provider.canLoadObject(ofClass: NSImage.self) {
             provider.loadObject(ofClass: NSImage.self) { object, error in
                 if error != nil {
@@ -677,6 +692,19 @@ struct ChatView: View {
             do {
                 let prepared = try await Task.detached(priority: .userInitiated) {
                     try self.pipeline.prepare(url: url)
+                }.value
+                imageDraft = prepared
+            } catch {
+                shakeTrigger += 1
+            }
+        }
+    }
+
+    private func preparePicked(gifData: Data) {
+        Task {
+            do {
+                let prepared = try await Task.detached(priority: .userInitiated) {
+                    try self.pipeline.prepare(gifData: gifData)
                 }.value
                 imageDraft = prepared
             } catch {
