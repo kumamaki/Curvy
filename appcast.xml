@@ -7,6 +7,15 @@
         <language>en</language>
         <!-- Entries are prepended here by scripts/update-appcast.sh on each release. -->
         <item>
+            <title>1.2.3</title>
+            <pubDate>Sun, 10 May 2026 15:40:49 +0000</pubDate>
+            <link>https://github.com/kumamaki/Curvy</link>
+            <sparkle:version>1.2.3</sparkle:version>
+            <sparkle:shortVersionString>1.2.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/kumamaki/Curvy/releases/download/v1.2.3/Curvy-1.2.3.dmg" length="4160838" type="application/octet-stream" sparkle:edSignature="NsB7fQYi1phV88Wk0Frno/i+y21D7oSYAtDjqIbgdVssRfO2lmeyloYb7vWyQbaBKw3lMXhcHUES7xqkQGJyCQ=="/>
+        </item>
+        <item>
             <title>1.2.2</title>
             <pubDate>Sat, 09 May 2026 14:15:35 +0000</pubDate>
             <link>https://github.com/kumamaki/Curvy</link>
