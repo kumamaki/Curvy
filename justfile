@@ -75,28 +75,40 @@ package:
 
 # === Release ================================================================
 
-# Bump the latest v* tag (major | minor | patch) and push it. The GitHub Action
-# builds the DMG and attaches it to the release. Always tags origin/main —
-# safe to run from any branch, including gitbutler/workspace.
-# First-ever release uses v0.0.0 as the base, so `just ship patch` → v0.0.1.
+# Delegates to scripts/release.sh, which validates preconditions (clean tree,
+# GitButler awareness, tag uniqueness on local + remote, strict monotonic
+# version), tags origin/main, and pushes the tag — which triggers
+# .github/workflows/release.yml.
+#
+# Safe to run from any branch including gitbutler/workspace; release.sh
+# always tags origin/main in GitButler mode. First-ever release uses v0.0.0
+# as the base, so `just ship patch` → v0.0.1.
+#
+# For a dry-run preview without prompting, invoke the script directly:
+#   ./scripts/release.sh --version 1.2.3                    # prints plan, no mutation
+#   ./scripts/release.sh --version 1.2.3 --confirm --watch  # prompt, tag, push, watch CI
+#   ./scripts/release.sh --version 1.2.3 --push --watch     # silent tag + push + watch CI
+#
+# Bump v* tag (major|minor|patch), confirm, then push to trigger the release.
 ship kind:
     #!/usr/bin/env bash
     set -euo pipefail
     case "{{kind}}" in
       major|minor|patch) ;;
-      *) echo "usage: just ship <major|minor|patch>"; exit 1 ;;
+      *) echo "usage: just ship <major|minor|patch>" >&2; exit 2 ;;
     esac
     git fetch origin main --tags --quiet
     target=$(git rev-parse origin/main)
-    latest=$(git tag --list 'v*' --sort=-version:refname | head -1)
-    latest=${latest:-v0.0.0}
-    if ! [[ "${latest#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-      echo "latest tag <${latest}> is not vX.Y.Z — fix manually"
-      exit 1
-    fi
+    # --merged origin/main filters tags not reachable from our main
+    # (defensive against stale upstream tags). Falls back to v0.0.0 for
+    # the first-ever release.
+    latest="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --merged origin/main --sort=-version:refname | head -1)"
+    latest="${latest:-v0.0.0}"
+    # No-op release guard: if origin/main is already at the latest tag,
+    # bumping would create a new tag pointing at the same commit.
     if git rev-parse -q --verify "refs/tags/${latest}" >/dev/null \
        && [ "$(git rev-parse "${latest}^{commit}")" = "${target}" ]; then
-      echo "origin/main is already tagged ${latest} — land new commits before shipping"
+      echo "origin/main is already tagged ${latest} — land new commits before shipping" >&2
       exit 1
     fi
     IFS=. read -r major minor patch <<< "${latest#v}"
@@ -105,16 +117,12 @@ ship kind:
       minor) minor=$((minor+1)); patch=0 ;;
       patch) patch=$((patch+1)) ;;
     esac
-    new="v${major}.${minor}.${patch}"
-    echo "==> bumping {{kind}}: ${latest} → ${new}"
-    echo "    target: origin/main @ $(git log -1 --format='%h %s' "${target}")"
+    next="${major}.${minor}.${patch}"
+    echo "==> bumping {{kind}}: ${latest} → v${next}"
     echo
-    read -r -p "Push ${new} now? [y/N] " reply
-    case "$reply" in
-      y|Y|yes|YES) ;;
-      *) echo "ship: aborted." >&2; exit 1 ;;
-    esac
-    git tag -a "${new}" -m "Release ${new}" "${target}"
-    git push origin "${new}"
-    echo "tagged ${new} — workflow:"
+    # --confirm validates preconditions, prints the plan (including the
+    # annotated tag message), prompts on /dev/tty, and only then tags + pushes.
+    # One invocation closes the double-fetch window where the tree could
+    # have shifted between the just-recipe's check and the script's push.
+    ./scripts/release.sh --version "${next}" --confirm
     open https://github.com/kumamaki/Curvy/actions
