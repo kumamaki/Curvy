@@ -44,6 +44,8 @@ targets:
         SUEnableAutomaticChecks: true
     entitlements:
       path: Curvy/Resources/Curvy.entitlements
+      properties:
+        com.apple.security.cs.disable-library-validation: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.kumamaki.Curvy
