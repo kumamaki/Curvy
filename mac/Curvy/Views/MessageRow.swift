@@ -394,7 +394,7 @@ struct MessageRow: View {
                     )
                     .padding(.horizontal, 6)
                     .padding(.vertical, 4)
-                    .glassEffect(.regular, in: .capsule)
+                    .glassyBackground(in: .capsule)
                     .padding(8)
                 }
             }

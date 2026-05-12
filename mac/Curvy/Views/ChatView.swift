@@ -397,8 +397,7 @@ struct ChatView: View {
         // the rendering, not unmounting it — measurement still runs.
         .opacity(didSeed ? 1 : 0)
         .scrollPosition($scrollPosition, anchor: .bottom)
-        .scrollEdgeEffectStyle(.soft, for: .top)
-        .scrollEdgeEffectStyle(.soft, for: .bottom)
+        .softScrollEdges()
         .onChange(of: cachedRows.last?.id, initial: true) { _, newID in
             handleLastBubbleChange(newID)
         }
@@ -880,8 +879,8 @@ private struct UpdateAvailablePill: View {
 /// message list when new bubbles arrive while the user is reading
 /// scrollback. Tapping fires the `action` closure (the parent jumps
 /// the scroll to the latest bubble). Glass styling keeps it visually
-/// continuous with the rest of the chrome — buttonStyle(.glass) is
-/// the shipping macOS 26 affordance.
+/// continuous with the rest of the chrome on macOS 26+;
+/// `adaptiveGlassProminent` falls back to bordered-prominent on 15.
 private struct JumpToLatestPill: View {
     let count: Int
     let action: () -> Void
@@ -897,7 +896,7 @@ private struct JumpToLatestPill: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
-        .buttonStyle(.glassProminent)
+        .adaptiveGlassProminent()
         .tint(.curvyBrand)
     }
 }

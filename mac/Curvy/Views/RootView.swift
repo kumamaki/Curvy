@@ -143,7 +143,7 @@ private struct ErrorView: View {
             Button("Start over") {
                 session.signOut()
             }
-            .buttonStyle(.glassProminent)
+            .adaptiveGlassProminent()
             .controlSize(.large)
         }
         .padding(40)

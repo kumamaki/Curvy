@@ -8,7 +8,7 @@ packages:
 options:
   bundleIdPrefix: dev.kumamaki
   deploymentTarget:
-    macOS: "26.0"
+    macOS: "15.0"
   developmentLanguage: en
   createIntermediateGroups: true
   generateEmptyDirectories: true
@@ -35,7 +35,7 @@ targets:
       properties:
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
-        LSMinimumSystemVersion: "26.0"
+        LSMinimumSystemVersion: "15.0"
         LSApplicationCategoryType: public.app-category.social-networking
         NSHumanReadableCopyright: "Curvy. A private group chat over GitHub."
         NSPrincipalClass: NSApplication
@@ -50,7 +50,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.kumamaki.Curvy
         PRODUCT_NAME: Curvy
-        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        MACOSX_DEPLOYMENT_TARGET: "15.0"
         MARKETING_VERSION: "0.0.1"
         CURRENT_PROJECT_VERSION: "1"
         ENABLE_HARDENED_RUNTIME: YES
@@ -76,7 +76,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.kumamaki.CurvyTests
         PRODUCT_NAME: CurvyTests
-        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        MACOSX_DEPLOYMENT_TARGET: "15.0"
         GENERATE_INFOPLIST_FILE: YES
         BUNDLE_LOADER: "$(TEST_HOST)"
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Curvy.app/Contents/MacOS/Curvy"

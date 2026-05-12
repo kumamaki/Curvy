@@ -40,7 +40,7 @@ struct InviteView: View {
                 .scrollContentBackground(.hidden)
                 .frame(maxWidth: 460, minHeight: 96, maxHeight: 140)
                 .padding(12)
-                .glassEffect(.regular, in: .rect(cornerRadius: 14))
+                .glassyBackground(in: .rect(cornerRadius: 14))
                 .focused($pasteFieldFocused)
 
             Button {
@@ -51,7 +51,7 @@ struct InviteView: View {
                     .frame(minWidth: 260)
                     .padding(.vertical, 2)
             }
-            .buttonStyle(.glassProminent)
+            .adaptiveGlassProminent()
             .tint(Color.curvyInk)
             .controlSize(.extraLarge)
             .disabled(paste.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isValidating)

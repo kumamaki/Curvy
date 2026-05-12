@@ -139,7 +139,7 @@ just package          # build Release + package into dist/Curvy.dmg
 just ship <bump>      # bump v-tag (major|minor|patch), push, trigger Actions
 ```
 
-Requires Xcode 26 + macOS 26 + xcodegen + just.
+Requires Xcode 26 (build SDK) + macOS 15+ (runtime) + xcodegen + just.
 
 ```sh
 brew install xcodegen just
@@ -154,9 +154,12 @@ fresh generate.
 ### Swift (`mac/`)
 
 - Swift 6, **strict concurrency complete.** Don't downgrade.
-- macOS 26 deployment target. Use new APIs freely. **Skip `#available`
-  gating for macOS 26+ APIs** — there's no older floor to fall back to,
-  so the gates are noise.
+- macOS 15 deployment target, compiled against the macOS 26 SDK. Use
+  macOS 14/15 APIs freely. **Any macOS 26+ API requires
+  `if #available(macOS 26, *)` with a sensible fallback.** Centralize
+  the gating in a helper rather than scattering `#available` blocks
+  through view code — see the Liquid Glass section below for the
+  pattern.
 - `@Observable` + `@State` over `ObservableObject` + `@StateObject`.
 - `@MainActor` on stores; mark `@ObservationIgnored` on any property
   wrapper inside an `@Observable` class.
@@ -168,15 +171,20 @@ fresh generate.
 
 ### Liquid Glass
 
-- We adopt Liquid Glass deliberately. The window background is glass,
-  cards are glass, buttons use `.buttonStyle(.glass)` /
-  `.buttonStyle(.glassProminent)`. **Message bubbles will stay solid
-  in v1** — text legibility on glass is fragile, and chat is
-  read-heavy.
-- Apply `.glassEffect(...)` AFTER layout modifiers (padding/frame), not
-  before.
-- Group co-located glass surfaces in a `GlassEffectContainer` so they
-  sample consistently. Glass cannot sample other glass.
+- We adopt Liquid Glass deliberately on macOS 26+. Cards are glass,
+  prominent buttons use `.adaptiveGlassProminent()`. **Message bubbles
+  will stay solid in v1** — text legibility on glass is fragile, and
+  chat is read-heavy.
+- **Never call `.glassEffect(...)` or `.buttonStyle(.glassProminent)`
+  inline.** Go through the two helpers in
+  `mac/Curvy/Views/Support/GlassFallback.swift`:
+  - `.glassyBackground(in: shape)` — glass on 26+, `.thinMaterial` on 15.
+  - `.adaptiveGlassProminent()` — `.glassProminent` on 26+,
+    `.borderedProminent` on 15. Chain `.tint(...)` afterwards as usual.
+- Apply the modifier AFTER layout modifiers (padding/frame), not before.
+- `GlassEffectContainer` (macOS 26+ only) has no fallback equivalent —
+  if you need it, gate it locally with `if #available(macOS 26, *)`.
+  Currently unused.
 
 ### Git
 
@@ -265,11 +273,15 @@ curl -s -H "Authorization: Bearer $YOUR_PAT" \
 SDKs/MacOSX.sdk/System/Library/Frameworks/SwiftUICore.framework/\
 Modules/SwiftUICore.swiftmodule/arm64e-apple-macos.swiftinterface
   ```
-- **`#available` gating is noise when macOS 26 is the deployment
-  target.** Every macOS 26+ API is available unconditionally — adding
-  `if #available(macOS 26, *)` produces a guard that always passes plus
-  a fallback branch that's dead code. Skip it. The skill's reference
-  text suggests gating; ignore that for *this* project specifically.
+- **`#available` gating is required for macOS 26+ APIs now that the
+  deployment target is 15.** macOS 14 and 15 APIs (`@Observable`,
+  SwiftData, `.symbolEffect`, `.scrollPosition`,
+  `.contentTransition(.numericText)`, `.controlSize(.extraLarge)`,
+  `.windowToolbarStyle(.unified)`, etc.) are unconditional — gating
+  those is noise. Anything macOS 26+ (Liquid Glass primarily) must
+  have a fallback path; centralize the gating in a helper so call
+  sites stay one line. The Liquid Glass section above is the template
+  pattern.
 - **OAuth Device Flow was wrong for a 4-person closed group.** I
   initially built it because it's the "professional" pattern. The user
   pushed back: "why would we need a sign-in with github?" — correctly.
@@ -335,7 +347,8 @@ list.
 
 This project shares a developer (`kumamaki`) and conventions with
 [app](https://github.com/kumamaki/app), but is otherwise
-independent. Both target macOS 26, Swift 6, use xcodegen + just, and
+independent. app targets macOS 26; Curvy targets macOS 15 (built
+against the same macOS 26 SDK). Both use Swift 6, xcodegen + just, and
 follow the same `@Observable` + `@MainActor` store style. **Do not**
 share code via a Swift package or symlinks — they're separate apps with
 separate bundle IDs and different threat models. Copy-paste with
