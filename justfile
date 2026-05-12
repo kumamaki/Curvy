@@ -66,7 +66,6 @@ package:
       exit 1
     fi
     version="${latest#v}"
-    echo "==> packaging Curvy ${version}"
     OUT_DMG="dist/Curvy-${version}.dmg" \
     VOLNAME="Curvy ${version}" \
     MARKETING_VERSION="${version}" \
