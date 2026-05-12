@@ -1,7 +1,8 @@
 import Foundation
 
-/// The wire-level wrapper around one comment body on Issue #1 of
-/// `curvy-room`. Three required fields:
+/// The wire-level wrapper around one comment body on the room issue
+/// in `curvy-room` (Issue #1 in Release, Issue #2 in Debug — see
+/// `RoomConfig`). Three required fields:
 ///
 /// ```
 /// {
