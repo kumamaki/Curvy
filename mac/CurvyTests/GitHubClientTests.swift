@@ -70,7 +70,7 @@ struct GitHubClientTests {
         _ = try await client.listComments(invite: invite)
         let request = try #require(captured.get())
         let url = try #require(request.url)
-        #expect(url.path == "/repos/kumamaki/curvy-room/issues/1/comments")
+        #expect(url.path == "/repos/kumamaki/curvy-room/issues/\(RoomConfig.issueNumber)/comments")
         #expect(request.httpMethod == "GET")
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer github_pat_test")
         #expect(request.value(forHTTPHeaderField: "X-GitHub-Api-Version") == "2022-11-28")
@@ -167,7 +167,7 @@ struct GitHubClientTests {
 
         let request = try #require(captured.get())
         #expect(request.httpMethod == "POST")
-        #expect(request.url?.path == "/repos/kumamaki/curvy-room/issues/1/comments")
+        #expect(request.url?.path == "/repos/kumamaki/curvy-room/issues/\(RoomConfig.issueNumber)/comments")
         #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
 
         let bodyData = try #require(request.httpBody)

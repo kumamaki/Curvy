@@ -98,12 +98,13 @@ struct GitHubClient: Sendable {
         _ = try await execute(request)
     }
 
-    /// Fetch basic metadata for an issue — specifically its comment count,
-    /// which `MessageStore` uses on first launch to compute which page
-    /// of comment history to seed from so the newest messages appear first.
-    func issueInfo(invite: Invite, issue: Int = 1) async throws -> IssueInfo {
+    /// Fetch basic metadata for the room issue — specifically its
+    /// comment count, which `MessageStore` uses on first launch to
+    /// compute which page of comment history to seed from so the newest
+    /// messages appear first.
+    func issueInfo(invite: Invite) async throws -> IssueInfo {
         let request = try authenticatedRequest(
-            path: "/repos/\(invite.owner)/\(invite.repo)/issues/\(issue)",
+            path: "/repos/\(invite.owner)/\(invite.repo)/issues/\(RoomConfig.issueNumber)",
             token: invite.token
         )
         let data = try await execute(request)
@@ -121,7 +122,6 @@ struct GitHubClient: Sendable {
     /// and by `loadOlderMessages` to page backwards through history.
     func listComments(
         invite: Invite,
-        issue: Int = 1,
         since: Date? = nil,
         page: Int = 1,
         perPage: Int = 100
@@ -137,7 +137,7 @@ struct GitHubClient: Sendable {
             query.append(URLQueryItem(name: "since", value: since.formatted(style)))
         }
         let request = try authenticatedRequest(
-            path: "/repos/\(invite.owner)/\(invite.repo)/issues/\(issue)/comments",
+            path: "/repos/\(invite.owner)/\(invite.repo)/issues/\(RoomConfig.issueNumber)/comments",
             queryItems: query,
             token: invite.token
         )
@@ -153,10 +153,10 @@ struct GitHubClient: Sendable {
     /// envelope (base64 of JSON), opaque to GitHub. Returns the created
     /// `IssueComment` so callers can capture the assigned ID for local
     /// caching without a follow-up GET.
-    func postComment(invite: Invite, issue: Int = 1, body: String) async throws -> IssueComment {
+    func postComment(invite: Invite, body: String) async throws -> IssueComment {
         let payload = try Self.encoder.encode(["body": body])
         let request = try authenticatedRequest(
-            path: "/repos/\(invite.owner)/\(invite.repo)/issues/\(issue)/comments",
+            path: "/repos/\(invite.owner)/\(invite.repo)/issues/\(RoomConfig.issueNumber)/comments",
             method: "POST",
             body: payload,
             token: invite.token

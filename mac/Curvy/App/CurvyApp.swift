@@ -13,12 +13,28 @@ struct CurvyApp: App {
     @State private var updateMonitor = UpdateMonitor()
 
     init() {
+        // Debug and Release builds share the bundle ID, so without an
+        // explicit store name they'd share the same SwiftData file.
+        // That contaminates Debug with Release-room messages (and vice
+        // versa) — visually the wrong room, even though polling/posting
+        // is correctly gated by `RoomConfig.issueNumber`. Naming the
+        // store gives each build its own file at the default location.
+        #if DEBUG
+        let modelConfig = ModelConfiguration("CurvyCache-Debug")
+        #else
+        // Unnamed = SwiftData's default store filename. Keep this as-is
+        // even if we rename Debug — renaming Release would orphan
+        // friends' existing local caches and force a one-time reseed
+        // from Issue #1's comment history on next launch.
+        let modelConfig = ModelConfiguration()
+        #endif
+
         let container: ModelContainer
         do {
             container = try ModelContainer(
                 for: Schema([CachedMessage.self]),
                 migrationPlan: CachedMessageMigrationPlan.self,
-                configurations: [ModelConfiguration()]
+                configurations: [modelConfig]
             )
         } catch {
             fatalError("Could not create ModelContainer for CachedMessage: \(error)")

@@ -309,8 +309,9 @@ final class MessageStore {
     ///
     /// 1. PUT the AES-GCM ciphertext to `blobs/<uuid>.bin` via the
     ///    Contents API (creates a commit on the `blobs` branch).
-    /// 2. POST the room-key-sealed envelope to Issue #1's comments,
-    ///    referencing the new file's `path` + `sha`.
+    /// 2. POST the room-key-sealed envelope to the room issue's
+    ///    comments (see `RoomConfig`), referencing the new file's
+    ///    `path` + `sha`.
     /// 3. (Failure path only) DELETE the orphan file if the comment
     ///    POST fails — keeps `curvy-room` from accreting unreferenced
     ///    ciphertext.

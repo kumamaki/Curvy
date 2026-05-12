@@ -255,6 +255,28 @@ curl -s -H "Authorization: Bearer $YOUR_PAT" \
   https://api.github.com/repos/kumamaki/curvy-room | jq .full_name
 ```
 
+### Debug builds use a separate room issue
+
+Release builds post to **Issue #1** of `curvy-room` — the real chat.
+Debug builds post to **Issue #2** so iterating locally doesn't pollute
+production history. The split is a compile-time constant in
+`mac/Curvy/Models/RoomConfig.swift` (gated on `#if DEBUG`); the invite
+bundle is unchanged. All three `GitHubClient` endpoints
+(`issueInfo`, `listComments`, `postComment`) route through
+`RoomConfig.issueNumber`.
+
+One-time setup — Issue #2 must exist in `curvy-room` before the first
+Debug build can poll or post:
+
+```sh
+gh api -X POST repos/kumamaki/curvy-room/issues \
+  -f title='Curvy Debug Room' \
+  -f body='Dev-only — Debug builds post here.'
+```
+
+If a Debug build 404s on the first `listComments` or `postComment`,
+the issue is missing — run the command above.
+
 ## Lessons learned (don't repeat)
 
 - **`Glass.prominent` does not exist in shipping macOS 26.2.** The
