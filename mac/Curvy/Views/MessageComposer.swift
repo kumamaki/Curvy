@@ -42,6 +42,12 @@ struct MessageComposer: View {
     /// is the source of truth for mentions, resolved at send time
     /// inside `MessageStore.send`.
     let knownSenders: [String]
+    /// Monotonic counter bumped by `ChatView.send()` for each send
+    /// tap. Drives the tinted-circle pulse behind the send glyph —
+    /// visual ack that the tap registered, replacing the more
+    /// elaborate cross-view matched-geometry morph that didn't pay
+    /// off (de-syncing source/destination plus scroll perf cost).
+    let sendPulseTick: Int
     let onSend: () -> Void
     let onPickError: (any Error) -> Void
     let onLoadURL: (URL) -> Void
@@ -294,18 +300,55 @@ struct MessageComposer: View {
             sendPulse.toggle()
             onSend()
         } label: {
-            Image(systemName: "arrow.up.circle.fill")
-                .font(.system(size: 28, weight: .medium))
-                .foregroundStyle(
-                    hasContent ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary)
-                )
-                .symbolRenderingMode(.hierarchical)
-                .symbolEffect(.bounce.up.byLayer, options: .speed(1.6), value: sendPulse)
+            ZStack {
+                // Tinted pulse: a Circle behind the icon that scales
+                // up and fades on each `sendPulseTick` bump. Driven by
+                // a `.keyframeAnimator` so it plays exactly once per
+                // tick and resets — no state to manage in ChatView,
+                // no cross-view machinery, no scroll-perf footprint.
+                Circle()
+                    .fill(.tint)
+                    .frame(width: 28, height: 28)
+                    .keyframeAnimator(
+                        initialValue: PulseFrame.idle,
+                        trigger: sendPulseTick
+                    ) { content, frame in
+                        content
+                            .scaleEffect(frame.scale)
+                            .opacity(frame.opacity)
+                    } keyframes: { _ in
+                        KeyframeTrack(\.scale) {
+                            LinearKeyframe(1.0, duration: 0)
+                            SpringKeyframe(1.6, duration: 0.36, spring: .snappy)
+                        }
+                        KeyframeTrack(\.opacity) {
+                            LinearKeyframe(0.0, duration: 0)
+                            LinearKeyframe(0.45, duration: 0.05)
+                            LinearKeyframe(0.0, duration: 0.34)
+                        }
+                    }
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: 28, weight: .medium))
+                    .foregroundStyle(
+                        hasContent ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary)
+                    )
+                    .symbolRenderingMode(.hierarchical)
+                    .symbolEffect(.bounce.up.byLayer, options: .speed(1.6), value: sendPulse)
+            }
         }
         .buttonStyle(SendButtonStyle())
         .keyboardShortcut(.return, modifiers: .command)
         .accessibilityLabel("Send message")
         .help("Send (Return or ⌘↩)")
+    }
+
+    /// Keyframe state for the send button's pulse. `scale` punches
+    /// from 1.0 → 1.6 while `opacity` blips up then fades — net effect
+    /// is a tinted ring that briefly "throws" outward from the icon.
+    private struct PulseFrame {
+        var scale: CGFloat
+        var opacity: Double
+        static let idle = PulseFrame(scale: 1.0, opacity: 0.0)
     }
 
     /// The 60-tall preview chip that appears above the text field when

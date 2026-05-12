@@ -81,6 +81,13 @@ struct ChatView: View {
     /// between them — same motion iMessage uses on tapback landing.
     @Namespace private var reactionNamespace
 
+    /// Bumped by `send()` to retrigger the composer's send-button
+    /// pulse animation — a tinted Circle behind the icon that scales
+    /// up and fades. Cheap visual ack of the tap that doesn't depend
+    /// on cross-view matched-geometry, which we tried and abandoned
+    /// (sources de-syncing with destinations + scroll-perf regression).
+    @State private var sendPulseTick: Int = 0
+
     private let pipeline = ImagePipeline()
 
     var body: some View {
@@ -92,6 +99,7 @@ struct ChatView: View {
                     replyingTo: $replyingTo,
                     shakeTrigger: shakeTrigger,
                     knownSenders: cachedKnownSenders,
+                    sendPulseTick: sendPulseTick,
                     onSend: send,
                     onPickError: { _ in shakeTrigger += 1 },
                     onLoadURL: preparePicked(url:),
@@ -238,10 +246,23 @@ struct ChatView: View {
         let aggregated = aggregateReactions(rows: reactionRows)
         let byID = Dictionary(uniqueKeysWithValues: bubbleMessages.map { ($0.id, $0) })
 
+        // Treat pending and committed states as the same group bucket
+        // so the row's top padding doesn't animate from 12pt → 2pt when
+        // a pending text/image commits in place. Otherwise the row
+        // visibly jumps on commit — same logical message, same author.
+        func bucket(_ kind: CachedMessage.Kind) -> CachedMessage.Kind {
+            switch kind {
+            case .pending: return .text
+            case .pendingImage: return .image
+            default: return kind
+            }
+        }
+
         var prev: CachedMessage?
         return bubbleMessages.map { msg in
             defer { prev = msg }
-            let isNewGroup = prev?.sender != msg.sender || prev?.kind != msg.kind
+            let isNewGroup = prev?.sender != msg.sender
+                || (prev.map { bucket($0.kind) } != bucket(msg.kind))
             let replyParent = msg.replyTo
                 .flatMap { Int($0) }
                 .flatMap { byID[$0] }
@@ -339,6 +360,30 @@ struct ChatView: View {
         }
     }
 
+    /// Extracted out of the `ForEach` body to keep the modifier chain
+    /// inside the list short enough for the type-checker. Holds the
+    /// closures and matched-geometry plumbing in one place.
+    private func messageRowView(for row: RowItem) -> MessageRow {
+        let targetID = String(row.message.id)
+        return MessageRow(
+            message: row.message,
+            isMine: row.isMine,
+            showSenderLabel: row.isNewGroup,
+            replyTarget: row.replyTarget,
+            reactions: row.reactions,
+            mentionResolutions: row.mentionResolutions,
+            mySender: store.displayName,
+            reactionNamespace: reactionNamespace,
+            isHighlighted: highlightedID == row.id,
+            onReply: { replyingTo = $0 },
+            onCopy: { copy(row.message) },
+            onJumpToReplyParent: jumpToParent,
+            onToggleReaction: { emoji, alreadyMine in
+                toggleReaction(targetID: targetID, emoji: emoji, alreadyMine: alreadyMine)
+            }
+        )
+    }
+
     private var messageList: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
@@ -348,48 +393,19 @@ struct ChatView: View {
                         .padding(.vertical, 16)
                 }
                 ForEach(cachedRows) { row in
-                    MessageRow(
-                        message: row.message,
-                        isMine: row.isMine,
-                        showSenderLabel: row.isNewGroup,
-                        replyTarget: row.replyTarget,
-                        reactions: row.reactions,
-                        mentionResolutions: row.mentionResolutions,
-                        mySender: store.displayName,
-                        reactionNamespace: reactionNamespace,
-                        isHighlighted: highlightedID == row.id,
-                        onReply: { replyingTo = $0 },
-                        onCopy: { copy(row.message) },
-                        onJumpToReplyParent: { parent in jumpToParent(parent) },
-                        onToggleReaction: { emoji, alreadyMine in
-                            toggleReaction(
-                                targetID: String(row.message.id),
-                                emoji: emoji,
-                                alreadyMine: alreadyMine
-                            )
-                        }
-                    )
-                    // `.equatable()` lets SwiftUI skip MessageRow body
-                    // re-eval on scroll-driven ChatView body refreshes.
-                    // Without this, every visible row re-evaluates per
-                    // scroll tick because the closures above are
-                    // non-Equatable and defeat the default view diff.
-                    .equatable()
-                    .padding(.top, row.isNewGroup ? 12 : 2)
-                    .animation(
-                        reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.22),
-                        value: row.isNewGroup
-                    )
+                    messageRowView(for: row)
+                        .equatable()
+                        .padding(.top, row.isNewGroup ? 12 : 2)
+                        .animation(
+                            reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.22),
+                            value: row.isNewGroup
+                        )
                 }
             }
             .padding(.horizontal, 16)
             .padding(.top, 12)
             .padding(.bottom, 8)
             .scrollTargetLayout()
-            .animation(
-                reduceMotion ? .linear(duration: 0) : .spring(response: 0.34, dampingFraction: 0.82),
-                value: messages.count
-            )
         }
         // Hide the list until the seed lands. Avoids the documented
         // blank-viewport flash where LazyVStack measures empty until
@@ -403,7 +419,26 @@ struct ChatView: View {
         }
         .onChange(of: messages.map(\.id), initial: true) { _, _ in
             let anchorID = needsScrollRestoreID
-            cachedRows = buildRows()
+            let previousTailID = cachedRows.last?.id
+            let nextRows = buildRows()
+            let nextTailID = nextRows.last?.id
+            // Push-up: only animate the rebuild when a new bottom row
+            // appeared (and we're past the cold-load seed). Prepends
+            // from `loadOlderMessages` and steady-state updates that
+            // don't move the tail render under no animation — exactly
+            // matching the original intent without wrapping every
+            // scroll-driven body re-eval in an animation transaction.
+            let isTailInsert = didSeed
+                && previousTailID != nil
+                && nextTailID != nil
+                && previousTailID != nextTailID
+            if isTailInsert, !reduceMotion {
+                withAnimation(.snappy(duration: 0.32, extraBounce: 0.08)) {
+                    cachedRows = nextRows
+                }
+            } else {
+                cachedRows = nextRows
+            }
             cachedKnownSenders = knownSenders
             // After loading older messages, scroll back to where the
             // user was so the newly-prepended rows appear above them.
@@ -645,6 +680,11 @@ struct ChatView: View {
         // this flag, follows once, and resets it.
         forceFollowNextBubble = true
 
+        // Visual ack of the send tap. Composer reads `sendPulseTick`
+        // and replays a tinted-circle scale+fade behind the send glyph.
+        // Cheap, view-local, doesn't touch SwiftData or the row list.
+        sendPulseTick &+= 1
+
         Task {
             do {
                 if let attachedImage {
@@ -654,7 +694,10 @@ struct ChatView: View {
                         replyTo: replyID
                     )
                 } else {
-                    try await store.send(text: textToSend, replyTo: replyID)
+                    try await store.send(
+                        text: textToSend,
+                        replyTo: replyID
+                    )
                 }
             } catch {
                 // Restore drafts so the user doesn't lose their

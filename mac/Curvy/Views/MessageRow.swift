@@ -58,13 +58,14 @@ struct MessageRow: View {
     /// scroll-induced body re-eval. Without this, every parent body
     /// refresh re-allocates an NSImage from disk per visible row.
     @State private var cachedImage: NSImage?
-    /// Scale applied to the jumbo emoji Text. Defaults to 1.0 so
-    /// scroll-recycled rows render at full size with no animation;
-    /// `triggerJumboPopIfFresh()` collapses it to 0.6 then springs to
-    /// 1.08 → 1.0 only when the message arrived less than two seconds
-    /// ago. Without the freshness gate, every scroll-back would pop
-    /// every emoji-only row in view — visual noise we don't want.
+    /// Three-axis entrance state for the jumbo-emoji pop. Defaults are
+    /// the at-rest values, so scroll-recycled rows render correctly
+    /// without ever running the animation. `triggerJumboPopIfFresh()`
+    /// drives this through four chained `withAnimation` stages —
+    /// anticipation snap → overshoot spring → squash → settle.
     @State private var jumboScale: CGFloat = 1.0
+    @State private var jumboRotation: Double = 0
+    @State private var jumboOffset: CGFloat = 0
 
     private let bubbleCorner: CGFloat = 16
     private let bubbleTailCorner: CGFloat = 4
@@ -88,7 +89,6 @@ struct MessageRow: View {
                 if isMine { Spacer(minLength: 60) }
 
                 bubbleColumn
-                    .opacity(isOptimistic ? 0.65 : 1.0)
                     .contextMenu { contextMenuItems }
                     .popover(isPresented: $showingReactionPicker, arrowEdge: .bottom) {
                         ReactionPicker(
@@ -117,20 +117,21 @@ struct MessageRow: View {
 
     // MARK: - Transitions
 
-    /// Outgoing bubbles "leap" from the composer's bottom-trailing
-    /// corner with a pronounced scale + lift that mimics iMessage's
-    /// send animation. Incoming bubbles "land" gently from just below.
-    /// Different shapes communicate different agency: *I did this* vs.
-    /// *this arrived*.
+    /// Incoming bubbles "land" gently from just below — communicates
+    /// *this arrived*. Outgoing bubbles slide up from the bottom edge
+    /// of the viewport (visually near the send button) with an
+    /// opacity fade-in. Combined with the LazyVStack push-up animation
+    /// driven by `ChatView`'s `withAnimation` around `cachedRows`,
+    /// the prior rows lift to make room while the newcomer rises.
     private var insertionTransition: AnyTransition {
         guard !reduceMotion else { return .opacity }
         if isMine {
-            return .scale(scale: 0.6, anchor: .bottomTrailing)
-                .combined(with: .opacity)
-                .combined(with: .offset(y: 14))
-        } else {
-            return .offset(y: 6).combined(with: .opacity)
+            return .asymmetric(
+                insertion: .move(edge: .bottom).combined(with: .opacity),
+                removal: .opacity
+            )
         }
+        return .offset(y: 6).combined(with: .opacity)
     }
 
     private var weirdInsertionTransition: AnyTransition {
@@ -291,37 +292,51 @@ struct MessageRow: View {
             // float the emoji at chat-large size. Telegram-style.
             jumboEmojiBody(size: size)
         } else {
-            VStack(alignment: .leading, spacing: 3) {
+            // Bubble width is driven by the message body alone — the
+            // reply header rides as a top-anchored overlay so its
+            // `Spacer`-driven "fill width" appetite cannot stretch the
+            // bubble out to the full chat row. Top padding reserves a
+            // 39pt band (stripe height 24 + sender/body text ~27 -
+            // padding overlap, see inlineReplyHeader geometry) plus 3pt
+            // of breathing room before the message text starts. The
+            // 140pt minWidth keeps the band wide enough to fit the
+            // sender label when the message is just one or two words.
+            VStack(alignment: isMine ? .trailing : .leading, spacing: 5) {
+                PilledBody(text: message.body,
+                          mentions: mentionResolutions,
+                          myName: mySender)
+                    .font(.system(size: 13))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .foregroundStyle(Color.white)
+
+                if !reactions.groups.isEmpty {
+                    ReactionBadgeStack(
+                        reactions: reactions,
+                        mySender: mySender,
+                        namespace: reactionNamespace,
+                        isMine: isMine,
+                        onToggle: { emoji in
+                            onToggleReaction(emoji, isReactionMine(emoji))
+                        }
+                    )
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, replyTarget != nil ? 50 : 9)
+            .padding(.bottom, 9)
+            .frame(
+                minWidth: replyTarget != nil ? 150 : nil,
+                alignment: isMine ? .trailing : .leading
+            )
+            .background { bubbleBackground }
+            .overlay(alignment: .topLeading) {
                 if let target = replyTarget {
                     inlineReplyHeader(target)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                         .onTapGesture { onJumpToReplyParent(target) }
                 }
-
-                VStack(alignment: isMine ? .trailing : .leading, spacing: 5) {
-                    PilledBody(text: message.body,
-                              mentions: mentionResolutions,
-                              myName: mySender)
-                        .font(.system(size: 13))
-                        .fixedSize(horizontal: false, vertical: true)
-                        .foregroundStyle(Color.white)
-
-                    if !reactions.groups.isEmpty {
-                        ReactionBadgeStack(
-                            reactions: reactions,
-                            mySender: mySender,
-                            namespace: reactionNamespace,
-                            isMine: isMine,
-                            onToggle: { emoji in
-                                onToggleReaction(emoji, isReactionMine(emoji))
-                            }
-                        )
-                    }
-                }
-                .padding(.horizontal, 11)
-                .padding(.vertical, 7)
             }
-            .background { bubbleBackground }
             .clipShape(bubbleShape)
         }
     }
@@ -346,11 +361,14 @@ struct MessageRow: View {
     /// reactions on image bubbles).
     @ViewBuilder
     private func jumboEmojiBody(size: CGFloat) -> some View {
+        let anchor: UnitPoint = isMine ? .bottomTrailing : .bottomLeading
         VStack(alignment: isMine ? .trailing : .leading, spacing: 5) {
             Text(message.body)
                 .font(.system(size: size))
                 .fixedSize(horizontal: false, vertical: true)
-                .scaleEffect(jumboScale, anchor: isMine ? .bottomTrailing : .bottomLeading)
+                .scaleEffect(jumboScale, anchor: anchor)
+                .rotationEffect(.degrees(jumboRotation), anchor: anchor)
+                .offset(y: jumboOffset)
                 .onAppear { triggerJumboPopIfFresh() }
 
             if !reactions.groups.isEmpty {
@@ -370,27 +388,64 @@ struct MessageRow: View {
         }
     }
 
-    /// Plays the bouncy "pop" on jumbo emoji rows that just arrived,
-    /// no-op on scroll-recycled rows. The freshness window is two
-    /// seconds — long enough to cover network jitter on send/receive,
-    /// short enough that nothing scrolled past triggers it.
-    /// `accessibilityReduceMotion` short-circuits everything.
+    /// Four-stage entrance for jumbo emoji rows that just arrived
+    /// (< 2s): anticipation snap → overshoot spring → squash → settle.
+    /// Three axes (scale, rotation, yOffset) animate together so the
+    /// motion reads as a *throw* rather than a flat pop. Mine tips
+    /// forward-then-back; theirs tips the opposite way, mirroring
+    /// which side of the screen the bubble belongs to.
+    ///
+    /// Skipped on scroll-recycled rows (freshness gate) and when
+    /// `accessibilityReduceMotion` is on — the resting state values
+    /// (1.0 / 0 / 0) already match what the row should display, so a
+    /// no-op leaves the emoji visible.
     private func triggerJumboPopIfFresh() {
+        // Outgoing rows skip the pop — you don't need a celebration
+        // for your own send, and the optimistic+committed pair would
+        // otherwise fire it twice. Breathing opacity already signals
+        // the in-flight state.
+        guard !isMine else { return }
         let elapsed = Date().timeIntervalSince(message.sentAt)
         guard elapsed < 2.0 else { return }
         guard !reduceMotion else { return }
 
-        // Collapse instantly to 0.6, then spring up with overshoot,
-        // then settle. Two springs glued together — single spring with
-        // low damping overshoots too much for chat-sized motion.
-        jumboScale = 0.6
-        withAnimation(.spring(response: 0.42, dampingFraction: 0.62)) {
-            jumboScale = 1.08
+        let tilt: Double = -6
+
+        // Stage 1 — anticipation snap (instant, no animation).
+        // Collapses scale and tilts back so stage 2 has somewhere to
+        // launch from.
+        var snap = Transaction()
+        snap.disablesAnimations = true
+        withTransaction(snap) {
+            jumboScale = 0.5
+            jumboRotation = tilt
+            jumboOffset = 10
         }
+
+        // Stage 2 — overshoot spring (~0.34s). Scale punches past 1.0
+        // to 1.22, rotation flicks to the opposite side, offset pulls
+        // up past the resting line. This is the "throw."
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.58)) {
+            jumboScale = 1.22
+            jumboRotation = -tilt * 0.7
+            jumboOffset = -3
+        }
+
+        // Stage 3 — squash (~0.12s). Compress slightly under the
+        // overshoot, simulating the emoji bouncing off the "floor."
         Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(140))
-            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+            try? await Task.sleep(for: .milliseconds(280))
+            withAnimation(.spring(response: 0.12, dampingFraction: 0.78)) {
+                jumboScale = 0.94
+                jumboRotation = tilt * 0.2
+                jumboOffset = 0
+            }
+
+            // Stage 4 — settle (~0.18s). Back to resting state.
+            try? await Task.sleep(for: .milliseconds(110))
+            withAnimation(.spring(response: 0.22, dampingFraction: 0.85)) {
                 jumboScale = 1.0
+                jumboRotation = 0
             }
         }
     }
@@ -657,7 +712,7 @@ struct MessageRow: View {
                 .fill(stripeStyle)
                 .frame(width: 2.5, height: 24)
 
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(target.sender.isEmpty ? "—" : target.sender)
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(senderStyle)
@@ -676,16 +731,16 @@ struct MessageRow: View {
                 }
             }
 
-            // Greedy trailing spacer so the header band expands to match
-            // whatever width the sibling message body imposes on the
-            // outer VStack. Keeps the HStack's preferred width at its
-            // natural content size — `.frame(maxWidth: .infinity)` would
-            // propagate `.infinity` up the layout chain and balloon the
-            // whole bubble to chat-row width.
+            // Greedy trailing spacer so the header band expands to fill
+            // whatever width the bubble overlay slot offers (text case)
+            // or the explicit width imposed at the call site (image
+            // case). Safe here because in both call sites the header is
+            // inside an overlay or a fixed-width frame — the Spacer's
+            // appetite for `.infinity` never propagates outward.
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
         .background(overlayStyle)
     }
 
@@ -969,4 +1024,5 @@ private struct PillFlowLayout: Layout {
         return (frames, CGSize(width: maxRight, height: y + lineHeight))
     }
 }
+
 

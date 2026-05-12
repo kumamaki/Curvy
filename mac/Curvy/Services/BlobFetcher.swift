@@ -61,7 +61,9 @@ final class BlobFetcher {
 
     /// Move the pending sidecar at `pendingURL` to the content-addressable
     /// location for `assetPath`, evicting any stale file already there.
-    /// Returns the final URL.
+    /// Returns the final URL — callers usually only care about the
+    /// side effect (the move), so the result is discardable.
+    @discardableResult
     static func relocateSidecar(from pendingURL: URL, toAssetPath assetPath: String) throws -> URL {
         let finalURL = cacheURL(for: assetPath)
         try? FileManager.default.removeItem(at: finalURL)

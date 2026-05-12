@@ -64,14 +64,15 @@ struct ReactionBadgeStack: View {
         )
     }
 
-    /// Arrival: scale-up from 0 with a slight overshoot via spring,
-    /// plus opacity. Departure: scale-down to 0.6 + opacity. The
-    /// overshoot is what gives reactions their tactile "land + settle"
-    /// feel — pure linear scale would feel mechanical.
+    /// Arrival: opacity-only here — the badge itself drives its own
+    /// scale/rotation entry via a per-instance `KeyframeAnimator` on
+    /// appear, which gives a richer squash-and-settle than a single
+    /// transition scale could produce. Departure stays as scale+opacity
+    /// since there's nothing on the destination side to run a keyframe.
     private var badgeTransition: AnyTransition {
         guard !reduceMotion else { return .opacity }
         return .asymmetric(
-            insertion: .scale(scale: 0, anchor: .center).combined(with: .opacity),
+            insertion: .opacity,
             removal: .scale(scale: 0.6, anchor: .center).combined(with: .opacity)
         )
     }
