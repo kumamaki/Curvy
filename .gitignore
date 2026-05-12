@@ -23,6 +23,9 @@ mac/Curvy/Resources/Curvy.entitlements
 # -project mac/Curvy.xcodeproj -scheme Curvy`.
 buildServer.json
 
+# Cartog code-graph index (local SQLite). Regenerate with `cartog index .`.
+.cartog.db*
+
 # Build output
 mac/build/
 mac/dist/
