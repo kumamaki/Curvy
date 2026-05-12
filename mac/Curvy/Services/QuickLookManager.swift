@@ -5,7 +5,7 @@ import QuickLookUI
 
 /// Drives the system `QLPreviewPanel` for a single image at a time.
 /// `QLPreviewPanel` is a process-wide singleton `NSPanel`, so this is a
-/// singleton too — adopting the same shape app uses.
+/// singleton too.
 ///
 /// `previewURL` is `nonisolated(unsafe)` because `QLPreviewPanel` calls
 /// its data source on the main thread, which is exactly where `show(_:)`
