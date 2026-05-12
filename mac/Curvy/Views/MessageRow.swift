@@ -58,6 +58,13 @@ struct MessageRow: View {
     /// scroll-induced body re-eval. Without this, every parent body
     /// refresh re-allocates an NSImage from disk per visible row.
     @State private var cachedImage: NSImage?
+    /// Scale applied to the jumbo emoji Text. Defaults to 1.0 so
+    /// scroll-recycled rows render at full size with no animation;
+    /// `triggerJumboPopIfFresh()` collapses it to 0.6 then springs to
+    /// 1.08 → 1.0 only when the message arrived less than two seconds
+    /// ago. Without the freshness gate, every scroll-back would pop
+    /// every emoji-only row in view — visual noise we don't want.
+    @State private var jumboScale: CGFloat = 1.0
 
     private let bubbleCorner: CGFloat = 16
     private let bubbleTailCorner: CGFloat = 4
@@ -279,8 +286,12 @@ struct MessageRow: View {
     private var messageBody: some View {
         if isImage {
             imageBubble
+        } else if replyTarget == nil, let size = jumboEmojiSize(for: message.body) {
+            // Pure 1–3 emoji body, no reply quote: drop the bubble and
+            // float the emoji at chat-large size. Telegram-style.
+            jumboEmojiBody(size: size)
         } else {
-            VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 3) {
                 if let target = replyTarget {
                     inlineReplyHeader(target)
                         .contentShape(Rectangle())
@@ -312,6 +323,75 @@ struct MessageRow: View {
             }
             .background { bubbleBackground }
             .clipShape(bubbleShape)
+        }
+    }
+
+    /// Telegram-style font scale for emoji-only bodies. Returns `nil`
+    /// for normal text and for 4+ emoji bodies, which fall through to
+    /// the regular tinted bubble.
+    private func jumboEmojiSize(for body: String) -> CGFloat? {
+        guard let n = body.emojiOnlyCount else { return nil }
+        switch n {
+        case 1: return 56
+        case 2: return 44
+        case 3: return 32
+        default: return nil
+        }
+    }
+
+    /// Floating emoji presentation: no bubble background, no padding,
+    /// sized via `jumboEmojiSize`. Reactions still attach below the
+    /// emoji, wrapped in a glass capsule so the chips stay legible
+    /// against the chat backdrop (mirrors the same pattern used for
+    /// reactions on image bubbles).
+    @ViewBuilder
+    private func jumboEmojiBody(size: CGFloat) -> some View {
+        VStack(alignment: isMine ? .trailing : .leading, spacing: 5) {
+            Text(message.body)
+                .font(.system(size: size))
+                .fixedSize(horizontal: false, vertical: true)
+                .scaleEffect(jumboScale, anchor: isMine ? .bottomTrailing : .bottomLeading)
+                .onAppear { triggerJumboPopIfFresh() }
+
+            if !reactions.groups.isEmpty {
+                ReactionBadgeStack(
+                    reactions: reactions,
+                    mySender: mySender,
+                    namespace: reactionNamespace,
+                    isMine: isMine,
+                    onToggle: { emoji in
+                        onToggleReaction(emoji, isReactionMine(emoji))
+                    }
+                )
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
+                .glassyBackground(in: .capsule)
+            }
+        }
+    }
+
+    /// Plays the bouncy "pop" on jumbo emoji rows that just arrived,
+    /// no-op on scroll-recycled rows. The freshness window is two
+    /// seconds — long enough to cover network jitter on send/receive,
+    /// short enough that nothing scrolled past triggers it.
+    /// `accessibilityReduceMotion` short-circuits everything.
+    private func triggerJumboPopIfFresh() {
+        let elapsed = Date().timeIntervalSince(message.sentAt)
+        guard elapsed < 2.0 else { return }
+        guard !reduceMotion else { return }
+
+        // Collapse instantly to 0.6, then spring up with overshoot,
+        // then settle. Two springs glued together — single spring with
+        // low damping overshoots too much for chat-sized motion.
+        jumboScale = 0.6
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.62)) {
+            jumboScale = 1.08
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(140))
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                jumboScale = 1.0
+            }
         }
     }
 
@@ -595,10 +675,17 @@ struct MessageRow: View {
                         .truncationMode(.tail)
                 }
             }
+
+            // Greedy trailing spacer so the header band expands to match
+            // whatever width the sibling message body imposes on the
+            // outer VStack. Keeps the HStack's preferred width at its
+            // natural content size — `.frame(maxWidth: .infinity)` would
+            // propagate `.infinity` up the layout chain and balloon the
+            // whole bubble to chat-row width.
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 6)
-        .frame(maxWidth: 280, alignment: .leading)
         .background(overlayStyle)
     }
 
