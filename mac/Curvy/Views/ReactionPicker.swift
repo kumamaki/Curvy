@@ -59,7 +59,7 @@ struct ReactionPicker: View {
             }
         }
         .padding(8)
-        .glassEffect(.regular, in: .rect(cornerRadius: 22))
+        .glassyBackground(in: .rect(cornerRadius: 22))
         .task { await stagger() }
     }
 
