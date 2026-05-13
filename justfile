@@ -72,6 +72,45 @@ package:
     CURRENT_PROJECT_VERSION="${version}" \
       ./scripts/build-dmg.sh
 
+# === Logs ===================================================================
+
+# Subsystem used by AppLog. Single source of truth for the log predicates below.
+log_subsystem := "dev.kumamaki.Curvy"
+
+# Tail Curvy logs live. Ctrl-C to stop.
+#   just logs                 # all categories
+#   just logs net             # GitHub API only
+# Categories: net, store, session, crypto, blobs, images, notif, ql, ui, all (default).
+logs category="all":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cat=$(echo "{{category}}" | tr '[:upper:]' '[:lower:]')
+    if [[ "$cat" == "all" ]]; then
+      pred='subsystem == "{{log_subsystem}}"'
+    else
+      capped="$(tr '[:lower:]' '[:upper:]' <<< ${cat:0:1})${cat:1}"
+      pred='subsystem == "{{log_subsystem}}" AND category == "'"$capped"'"'
+    fi
+    echo "==> tailing $cat — Ctrl-C to stop"
+    exec log stream --style compact --level info --predicate "$pred"
+
+# Dump last <duration> of Curvy logs and exit.
+#   just logs-since             # all categories, last 5m
+#   just logs-since net 30s     # Net only, last 30s
+# Duration syntax: 30s, 5m, 1h.
+logs-since category="all" duration="5m":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cat=$(echo "{{category}}" | tr '[:upper:]' '[:lower:]')
+    if [[ "$cat" == "all" ]]; then
+      pred='subsystem == "{{log_subsystem}}"'
+    else
+      capped="$(tr '[:lower:]' '[:upper:]' <<< ${cat:0:1})${cat:1}"
+      pred='subsystem == "{{log_subsystem}}" AND category == "'"$capped"'"'
+    fi
+    echo "==> dumping $cat (last {{duration}})"
+    log show --style compact --info --debug --last {{duration}} --predicate "$pred"
+
 # === Release ================================================================
 
 # Delegates to scripts/release.sh, which validates preconditions (clean tree,

@@ -23,7 +23,7 @@ import SwiftData
 final class BlobFetcher {
     private let github: GitHubClient
     private let modelContext: ModelContext
-    private let logger = Logger(subsystem: "dev.kumamaki.Curvy", category: "BlobFetcher")
+    private let logger = AppLog.blobs
     private var inFlight: Set<String> = []
 
     init(github: GitHubClient, modelContext: ModelContext) {

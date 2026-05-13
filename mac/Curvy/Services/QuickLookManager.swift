@@ -24,7 +24,7 @@ import QuickLookUI
 final class QuickLookManager: NSObject, QLPreviewPanelDataSource, @unchecked Sendable {
     static let shared = QuickLookManager()
 
-    private let logger = Logger(subsystem: "dev.kumamaki.Curvy", category: "QuickLook")
+    private let logger = AppLog.ql
 
     nonisolated(unsafe) private var previewURL: URL?
 

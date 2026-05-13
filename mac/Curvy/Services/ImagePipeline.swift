@@ -52,7 +52,7 @@ struct ImagePipeline: Sendable {
     static let maxLongestSide: Int = 2048
     static let jpegQuality: CGFloat = 0.85
 
-    private static let logger = Logger(subsystem: "dev.kumamaki.Curvy", category: "ImagePipeline")
+    private static let logger = AppLog.images
 
     /// Read URL via `NSImage` and prepare. Used by NSOpenPanel + drag-
     /// drop file URLs. GIFs are passed through as-is to preserve animation;

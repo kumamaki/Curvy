@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os
 
 /// App-wide auth + room state.
 ///
@@ -46,16 +47,21 @@ final class SessionStore {
     /// valid invite in Keychain, verify it still works against GitHub
     /// and advance to `.ready`. Otherwise `.needsInvite`.
     func bootstrap() async {
+        AppLog.session.pub("bootstrap start")
         do {
             guard let invite = try loadInvite() else {
+                AppLog.session.pub("phase → needsInvite (no stored invite)")
                 phase = .needsInvite
                 return
             }
+            AppLog.session.pub("phase → validating")
             phase = .validating
             try await github.verifyAccess(invite: invite)
             currentInvite = invite
+            AppLog.session.pub("phase → ready (\(invite.owner)/\(invite.repo))")
             phase = .ready(repoSlug: "\(invite.owner)/\(invite.repo)")
         } catch {
+            AppLog.session.error("bootstrap failed: \(error.localizedDescription, privacy: .public)")
             phase = .error("Stored invite is no longer valid: \(error). Paste a fresh one.")
         }
     }
@@ -63,18 +69,24 @@ final class SessionStore {
     /// User pasted an invite into `InviteView`. Decode, validate
     /// against GitHub, persist on success.
     func applyInvite(_ raw: String) async {
+        AppLog.session.pub("applyInvite start")
         phase = .validating
         do {
             let invite = try Invite.decode(raw)
+            AppLog.session.pub("invite decoded — verifying access")
             try await github.verifyAccess(invite: invite)
             try saveInvite(invite)
             currentInvite = invite
+            AppLog.session.pub("phase → ready (\(invite.owner)/\(invite.repo))")
             phase = .ready(repoSlug: "\(invite.owner)/\(invite.repo)")
         } catch let error as Invite.DecodeError {
+            AppLog.session.error("invite decode failed: \(error.userFacing, privacy: .public)")
             phase = .error(error.userFacing)
         } catch let error as GitHubClient.GitHubError {
+            AppLog.session.error("GitHub rejected invite: \(error.description, privacy: .public)")
             phase = .error("GitHub rejected the invite: \(error)")
         } catch {
+            AppLog.session.error("applyInvite failed: \(error.localizedDescription, privacy: .public)")
             phase = .error("\(error)")
         }
     }

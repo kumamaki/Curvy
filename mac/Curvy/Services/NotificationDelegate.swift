@@ -15,7 +15,7 @@ import UserNotifications
 /// the store is fully started (e.g., very early in the app lifecycle).
 @MainActor
 final class NotificationDelegate: NSObject {
-    private let logger = Logger(subsystem: "dev.kumamaki.Curvy", category: "NotificationDelegate")
+    private let logger = AppLog.notif
 
     static let messageCategory = "curvy.message"
     private static let replyActionID = "REPLY"

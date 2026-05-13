@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Thin wrapper over GitHub's REST API. The endpoints v1 needs:
 /// `verifyAccess` to gate onboarding, `listComments` to pull new
@@ -373,11 +374,16 @@ struct GitHubClient: Sendable {
     // MARK: - Internals
 
     private func execute(_ request: URLRequest) async throws -> Data {
+        let method = request.httpMethod ?? "GET"
+        let path = request.url?.path ?? "?"
+        AppLog.net.pub("\(method) \(path)")
         let (data, response) = try await transport(request)
         guard let http = response as? HTTPURLResponse else {
+            AppLog.net.error("\(method, privacy: .public) \(path, privacy: .public) — invalid response")
             throw GitHubError.invalidResponse
         }
         guard (200..<300).contains(http.statusCode) else {
+            AppLog.net.error("\(method, privacy: .public) \(path, privacy: .public) → \(http.statusCode, privacy: .public)")
             switch http.statusCode {
             case 401:
                 throw GitHubError.unauthorized
@@ -390,6 +396,7 @@ struct GitHubClient: Sendable {
                 throw GitHubError.http(http.statusCode, body)
             }
         }
+        AppLog.net.pub("\(method) \(path) → \(http.statusCode)")
         return data
     }
 

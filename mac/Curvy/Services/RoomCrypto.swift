@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import os
 
 /// AES-GCM seal/open against the 32-byte room key. Stateless — every
 /// call is independent. `Sendable` struct rather than an actor for the
@@ -73,11 +74,13 @@ struct RoomCrypto: Sendable {
         do {
             plaintext = try AES.GCM.open(sealedBox, using: key)
         } catch {
+            AppLog.crypto.error("AES-GCM open failed — wrong key or tampered ciphertext")
             throw CryptoError.openFailed
         }
         do {
             return try Self.decoder.decode(MessagePayload.self, from: plaintext)
         } catch {
+            AppLog.crypto.error("payload decode failed: \(error.localizedDescription, privacy: .public)")
             throw CryptoError.payloadDecodeFailed(error)
         }
     }

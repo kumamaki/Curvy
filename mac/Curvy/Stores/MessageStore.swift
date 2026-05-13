@@ -60,7 +60,7 @@ final class MessageStore {
     @ObservationIgnored private let blobFetcher: BlobFetcher
     @ObservationIgnored private let notifier: Notifier
     @ObservationIgnored private let isFocused: @MainActor () -> Bool
-    @ObservationIgnored private let logger = Logger(subsystem: "dev.kumamaki.Curvy", category: "MessageStore")
+    @ObservationIgnored private let logger = AppLog.store
 
     @ObservationIgnored private let historyPerPage = 50
 

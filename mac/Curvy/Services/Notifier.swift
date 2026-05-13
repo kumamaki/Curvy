@@ -47,14 +47,13 @@ struct Notifier {
 
 extension Notifier {
     static var live: Notifier {
-        let logger = Logger(subsystem: "dev.kumamaki.Curvy", category: "Notifier")
         let center = UNUserNotificationCenter.current()
         return Notifier(
             requestAuthorization: {
                 do {
                     return try await center.requestAuthorization(options: [.alert, .sound])
                 } catch {
-                    logger.warning("authorization request failed: \(error.localizedDescription, privacy: .public)")
+                    AppLog.notif.warning("authorization request failed: \(error.localizedDescription, privacy: .public)")
                     return false
                 }
             },
@@ -68,7 +67,7 @@ extension Notifier {
                 let request = UNNotificationRequest(identifier: id, content: content, trigger: nil)
                 center.add(request) { error in
                     if let error {
-                        logger.warning("notification post failed: \(error.localizedDescription, privacy: .public)")
+                        AppLog.notif.warning("notification post failed: \(error.localizedDescription, privacy: .public)")
                     }
                 }
             },
@@ -82,7 +81,7 @@ extension Notifier {
                 let request = UNNotificationRequest(identifier: id, content: content, trigger: nil)
                 center.add(request) { error in
                     if let error {
-                        logger.warning("mention notification post failed: \(error.localizedDescription, privacy: .public)")
+                        AppLog.notif.warning("mention notification post failed: \(error.localizedDescription, privacy: .public)")
                     }
                 }
             },
