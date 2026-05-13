@@ -77,6 +77,20 @@ struct ChatView: View {
     /// between them — same motion iMessage uses on tapback landing.
     @Namespace private var reactionNamespace
 
+    /// Shared namespace for the send-button → bubble morph. The
+    /// tinted capsule behind the send glyph publishes the source;
+    /// the outgoing bubble's tinted background publishes the
+    /// destination when `morphingPendingID == row.id`. SwiftUI
+    /// interpolates the frame so the bubble grows out of the
+    /// send button — the iMessage hero-style motion.
+    @Namespace private var sendMorphNamespace
+    /// Holds the Int id of the pending row currently acting as the
+    /// matched-geometry destination. Set synchronously in `send()`
+    /// right after `insertPendingText`; cleared after the morph
+    /// settles (~500ms) so the matched-geometry binding detaches
+    /// before the network commit flips the row's id.
+    @State private var morphingPendingID: Int?
+
     /// Bumped by `send()` to retrigger the composer's send-button
     /// pulse animation — a tinted Circle behind the icon that scales
     /// up and fades. Cheap visual ack of the tap that doesn't depend
@@ -96,6 +110,7 @@ struct ChatView: View {
                     shakeTrigger: shakeTrigger,
                     knownSenders: cachedKnownSenders,
                     sendPulseTick: sendPulseTick,
+                    sendMorphNamespace: sendMorphNamespace,
                     onSend: send,
                     onPickError: { _ in shakeTrigger += 1 },
                     onLoadURL: preparePicked(url:),
@@ -255,7 +270,7 @@ struct ChatView: View {
         }
 
         var prev: CachedMessage?
-        return bubbleMessages.map { msg in
+        var rows = bubbleMessages.map { msg -> RowItem in
             defer { prev = msg }
             let isNewGroup = prev?.sender != msg.sender
                 || (prev.map { bucket($0.kind) } != bucket(msg.kind))
@@ -274,15 +289,38 @@ struct ChatView: View {
                     MentionMatch(name: name, handle: handleMap[name] ?? name)
                 }
             } ?? MentionResolver.resolve(in: msg.body, against: senders)
+            // Show a date separator before the first message and whenever
+            // the calendar day changes or the gap between messages exceeds
+            // one hour — same heuristic as iMessage.
+            let separatorDate: Date?
+            if let prev {
+                let sameDay = Calendar.current.isDate(msg.sentAt, inSameDayAs: prev.sentAt)
+                let gap = msg.sentAt.timeIntervalSince(prev.sentAt)
+                separatorDate = (!sameDay || gap > 3600) ? msg.sentAt : nil
+            } else {
+                separatorDate = msg.sentAt
+            }
             return RowItem(
                 message: msg,
                 isMine: msg.kind != .weird && msg.sender == myName,
                 isNewGroup: isNewGroup,
+                isLastInGroup: false,
                 replyTarget: replyParent,
                 reactions: aggregated[targetKey] ?? .empty(targetID: targetKey),
-                mentionResolutions: resolved
+                mentionResolutions: resolved,
+                separatorDate: separatorDate
             )
         }
+        // Second pass: set isLastInGroup by looking one step ahead.
+        // A row is last when the next row is from a different sender
+        // (or kind group), or when there is no next row.
+        for i in rows.indices {
+            let next = rows.indices.contains(i + 1) ? rows[i + 1] : nil
+            rows[i].isLastInGroup = next == nil
+                || next!.message.sender != rows[i].message.sender
+                || bucket(next!.message.kind) != bucket(rows[i].message.kind)
+        }
+        return rows
     }
 
     /// Fold raw `.reaction` / `.reactionRemove` rows into per-target
@@ -370,7 +408,10 @@ struct ChatView: View {
             mentionResolutions: row.mentionResolutions,
             mySender: store.displayName,
             reactionNamespace: reactionNamespace,
+            sendMorphNamespace: sendMorphNamespace,
+            morphingPendingID: morphingPendingID,
             isHighlighted: highlightedID == row.id,
+            isLastInGroup: row.isLastInGroup,
             onReply: { replyingTo = $0 },
             onCopy: { copy(row.message) },
             onJumpToReplyParent: jumpToParent,
@@ -399,9 +440,12 @@ struct ChatView: View {
                         .padding(.vertical, 16)
                 }
                 ForEach(cachedRows) { row in
+                    if let sepDate = row.separatorDate {
+                        DateSeparatorView(date: sepDate)
+                    }
                     messageRowView(for: row)
                         .equatable()
-                        .padding(.top, row.isNewGroup ? 12 : 2)
+                        .padding(.top, row.separatorDate != nil ? 4 : row.isNewGroup ? 20 : 1)
                 }
             }
             .padding(.horizontal, 16)
@@ -429,12 +473,58 @@ struct ChatView: View {
                 && previousTailID != nil
                 && nextTailID != nil
                 && previousTailID != nextTailID
+            let shouldFollow = isTailInsert && (forceFollowNextBubble || isPinnedToBottom)
+            let isOwnSend = isTailInsert && forceFollowNextBubble
+            if isTailInsert {
+                forceFollowNextBubble = false
+            }
+            AppLog.ui.pub("[rows] rebuild prev=\(cachedRows.count) next=\(nextRows.count) tailChanged=\(previousTailID != nextTailID) didSeed=\(didSeed) isTailInsert=\(isTailInsert) shouldFollow=\(shouldFollow) isOwnSend=\(isOwnSend)")
             if isTailInsert, !reduceMotion {
-                withAnimation(.spring(response: 0.42, dampingFraction: 0.72)) {
+                // Capture the morph id so the completion only clears
+                // *this* morph — a second send firing before this
+                // animation completes will have set a new
+                // `morphingPendingID`, and the new send's own
+                // completion handler will clear that one when its
+                // animation lands.
+                let morphSnapshot = morphingPendingID
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.72)) {
                     cachedRows = nextRows
+                } completion: {
+                    if morphingPendingID == morphSnapshot {
+                        morphingPendingID = nil
+                        AppLog.ui.pub("[morph] completion → cleared morphingPendingID")
+                    }
+                }
+                if !shouldFollow, didSeed {
+                    unreadInScrollback += 1
                 }
             } else {
                 cachedRows = nextRows
+            }
+
+            // Defer scrollTo to the next runloop tick. SwiftUI's
+            // layout pass for the newly-inserted row runs between
+            // the cachedRows mutation and this resumption — calling
+            // `scrollTo(edge: .bottom)` here resolves against the
+            // NEW content size, not the stale pre-insert one. That's
+            // load-bearing for reliability: doing it inside the
+            // same `withAnimation` as the row mutation produced
+            // "sometimes scrolls / sometimes doesn't / sometimes
+            // partial" because the bottom edge was being resolved
+            // against whatever content size happened to be measured
+            // at closure-eval time.
+            if shouldFollow {
+                isProgrammaticallyScrolling = true
+                let anim: Animation = reduceMotion
+                    ? .linear(duration: 0)
+                    : .spring(response: 0.4, dampingFraction: 0.82)
+                Task { @MainActor in
+                    await Task.yield()
+                    AppLog.ui.pub("[scroll] deferred scrollTo(edge: .bottom)")
+                    withAnimation(anim) {
+                        scrollPosition.scrollTo(edge: .bottom)
+                    }
+                }
             }
             cachedKnownSenders = knownSenders
             // Flip the seed flag the first time rows materialize. Gates
@@ -522,35 +612,13 @@ struct ChatView: View {
         )
     }
 
-    /// Auto-follow handler. Runs on `rows.last?.id` change. Steady-state
-    /// auto-follow is gated on `forceFollowNextBubble || isPinnedToBottom`
-    /// — non-following arrivals bump the unread counter that drives the
-    /// jump-to-latest pill.
-    ///
-    /// For own-send, `send()` already pinned the position to the
-    /// bottom edge synchronously — the scrollPosition tracks the
-    /// growing content automatically, so this handler is a no-op on
-    /// the follow path. For incoming bubbles we explicitly smooth-scroll
-    /// to keep the new arrival in view.
+    /// Tail-id change observer kept around for tracing only. The
+    /// scroll-on-arrival logic now lives inside the messages.onChange
+    /// handler so it can share a single `withAnimation` transaction
+    /// with the cachedRows mutation — two separate transactions
+    /// (one for rows, one for scroll) do NOT coalesce in SwiftUI.
     private func handleLastBubbleChange(_ newID: PersistentIdentifier?) {
-        guard let newID else { return }
-        let isOwnSend = forceFollowNextBubble
-        let shouldFollow = forceFollowNextBubble || isPinnedToBottom
-        forceFollowNextBubble = false
-        guard shouldFollow else {
-            if didSeed { unreadInScrollback += 1 }
-            return
-        }
-        if isOwnSend {
-            // Pre-pinned in send(); ScrollPosition's edge-tracking
-            // keeps the bottom in view as the pending row inserts.
-            isProgrammaticallyScrolling = true
-            return
-        }
-        isProgrammaticallyScrolling = true
-        withAnimation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.22)) {
-            scrollPosition.scrollTo(id: newID, anchor: .bottom)
-        }
+        AppLog.ui.pub("[tail] change → newID=\(String(describing: newID))")
     }
 
     /// Geometry-tick handler. Two responsibilities, both driven from
@@ -562,6 +630,7 @@ struct ChatView: View {
     private func handleScrollEdgeState(_ snap: ScrollEdgeState) {
         if isProgrammaticallyScrolling {
             if snap.atBottomTight {
+                AppLog.ui.pub("[geom] programmatic-scroll landed at bottom → isPinned=true")
                 isProgrammaticallyScrolling = false
                 isPinnedToBottom = true
             }
@@ -571,6 +640,7 @@ struct ChatView: View {
             // concurrent arrival to be miscounted as unread.
         } else {
             if isPinnedToBottom != snap.atBottomLoose {
+                AppLog.ui.pub("[geom] isPinned flip \(isPinnedToBottom) → \(snap.atBottomLoose)")
                 isPinnedToBottom = snap.atBottomLoose
             }
         }
@@ -660,17 +730,39 @@ struct ChatView: View {
         // and replays a tinted-circle scale+fade behind the send glyph.
         // Cheap, view-local, doesn't touch SwiftData or the row list.
         sendPulseTick &+= 1
+        AppLog.ui.pub("[send] tap → forceFollow=true pulseTick=\(sendPulseTick) isPinned=\(isPinnedToBottom) rows=\(cachedRows.count)")
 
-        // Pin the viewport to the bottom edge BEFORE the pending row
-        // arrives. This is the load-bearing piece for reliable
-        // own-send scroll — calling `scrollTo` after the row inserts
-        // races with SwiftUI's layout pass and is what was producing
-        // "sometimes works, sometimes doesn't". The ScrollPosition
-        // edge-mode keeps tracking the bottom as content grows below.
-        var snap = Transaction()
-        snap.disablesAnimations = true
-        withTransaction(snap) {
-            scrollPosition.scrollTo(edge: .bottom)
+        // Synchronous optimistic insert for the TEXT path. Hits
+        // SwiftData on the same runloop tick as the tap, so the
+        // `@Query`-driven `onChange` fires and the cachedRows update
+        // (+ animation) happens microseconds later instead of the
+        // ~50ms Task-scheduling delay we measured. Image sends still
+        // go through the Task path below — they require an async
+        // upload before the row should appear.
+        let syncInserted: CachedMessage?
+        if attachedImage == nil {
+            do {
+                syncInserted = try store.insertPendingText(text: textToSend, replyTo: replyID)
+                AppLog.ui.pub("[send] sync-insert ok pending.id=\(syncInserted?.id ?? 0)")
+            } catch {
+                AppLog.ui.pub("[send] sync-insert failed: \(error.localizedDescription)")
+                draftText = textToSend
+                imageDraft = attachedImage
+                shakeTrigger += 1
+                return
+            }
+        } else {
+            syncInserted = nil
+        }
+
+        // Light up the matched-geometry destination on the new row.
+        // The clear is driven by the cachedRows-mutating
+        // `withAnimation(_:) completion:` in `messages.onChange` —
+        // the morph ends exactly when the animation that's driving
+        // it ends, no magic timer.
+        if let inserted = syncInserted, !reduceMotion {
+            morphingPendingID = inserted.id
+            AppLog.ui.pub("[send] morphingPendingID=\(inserted.id)")
         }
 
         Task {
@@ -681,8 +773,9 @@ struct ChatView: View {
                         caption: captionToSend,
                         replyTo: replyID
                     )
-                } else {
-                    try await store.send(
+                } else if let syncInserted {
+                    try await store.uploadPendingText(
+                        syncInserted,
                         text: textToSend,
                         replyTo: replyID
                     )
@@ -864,9 +957,11 @@ private struct RowItem: Identifiable {
     let message: CachedMessage
     let isMine: Bool
     let isNewGroup: Bool
+    var isLastInGroup: Bool
     let replyTarget: CachedMessage?
     let reactions: MessageReactions
     let mentionResolutions: [MentionMatch]
+    var separatorDate: Date?
     var id: PersistentIdentifier { message.persistentModelID }
 }
 
@@ -929,6 +1024,33 @@ private struct JumpToLatestPill: View {
         }
         .adaptiveGlassProminent()
         .tint(.curvyBrand)
+    }
+}
+
+/// Centered time-context separator between message groups that are
+/// on different calendar days or more than an hour apart. Matches
+/// iMessage's floating date pill pattern.
+private struct DateSeparatorView: View {
+    let date: Date
+
+    var body: some View {
+        Text(label)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+            .background(.fill.quaternary, in: Capsule())
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+    }
+
+    private var label: String {
+        let cal = Calendar.current
+        if cal.isDateInToday(date) { return "Today" }
+        if cal.isDateInYesterday(date) { return "Yesterday" }
+        let days = cal.dateComponents([.day], from: date, to: .now).day ?? 0
+        if days < 7 { return date.formatted(.dateTime.weekday(.wide)) }
+        return date.formatted(.dateTime.month(.abbreviated).day())
     }
 }
 

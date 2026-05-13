@@ -48,6 +48,13 @@ struct MessageComposer: View {
     /// elaborate cross-view matched-geometry morph that didn't pay
     /// off (de-syncing source/destination plus scroll perf cost).
     let sendPulseTick: Int
+    /// Shared namespace for the send-button → bubble matched-geometry
+    /// morph. The tinted shape behind the send glyph publishes
+    /// `isSource: true`; `MessageRow`'s bubble background publishes
+    /// the destination when its row matches `morphingPendingID` in
+    /// `ChatView`. SwiftUI interpolates the frame so the bubble
+    /// reads as growing out of the send button.
+    let sendMorphNamespace: Namespace.ID
     let onSend: () -> Void
     let onPickError: (any Error) -> Void
     let onLoadURL: (URL) -> Void
@@ -301,11 +308,24 @@ struct MessageComposer: View {
             onSend()
         } label: {
             ZStack {
-                // Tinted pulse: a Circle behind the icon that scales
-                // up and fades on each `sendPulseTick` bump. Driven by
-                // a `.keyframeAnimator` so it plays exactly once per
-                // tick and resets — no state to manage in ChatView,
-                // no cross-view machinery, no scroll-perf footprint.
+                // Matched-geometry source. A tinted capsule the same
+                // size as the send glyph; it's the anchor that the
+                // outgoing bubble's tinted background animates *from*.
+                // SwiftUI interpolates this frame → the bubble's
+                // frame, so the bubble visually grows out of this
+                // exact spot. The shape stays filled with `.tint` so
+                // the color reads continuous through the morph.
+                Capsule()
+                    .fill(.tint)
+                    .frame(width: 28, height: 28)
+                    .matchedGeometryEffect(
+                        id: "sendMorph",
+                        in: sendMorphNamespace,
+                        properties: .frame,
+                        anchor: .center,
+                        isSource: true
+                    )
+                // Tinted ring pulse on tap (visual tap-ack).
                 Circle()
                     .stroke(Color.accentColor, lineWidth: 2)
                     .frame(width: 28, height: 28)

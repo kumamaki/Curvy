@@ -224,30 +224,28 @@ final class MessageStore {
     /// On failure the pending row is deleted and the error rethrows
     /// to the caller (which restores the draft text).
     func send(text: String, replyTo: String? = nil) async throws {
-        guard let invite = currentInvite, let key = roomKey else {
+        let pending = try insertPendingText(text: text, replyTo: replyTo)
+        try await uploadPendingText(pending, text: text, replyTo: replyTo)
+    }
+
+    /// Synchronous half of text send: builds the pending row, inserts
+    /// it into SwiftData, and saves. Returns the row so the caller can
+    /// hand it back to `uploadPendingText`. Splitting this off from
+    /// the async upload lets the UI call this directly from the tap
+    /// handler — the optimistic bubble appears in the same runloop
+    /// tick instead of waiting for `Task` scheduling + the async
+    /// prefix of `send`, which was costing ~50ms of perceived lag
+    /// before the send-animation could start.
+    func insertPendingText(text: String, replyTo: String?) throws -> CachedMessage {
+        guard currentInvite != nil, roomKey != nil else {
             throw SendError.notStarted
         }
         let now = Date()
-        // Body is the source of truth for mention targets — we resolve
-        // `@<token>` (either the handle "Mehdi" or the full name
-        // "Mehdi Khaledi") against the live cache of known senders at
-        // send time. The wire carries canonical full names; `.map(\.name)`
-        // strips the handle field used only by the renderer.
         let matches = MentionResolver.resolve(
             in: text,
             against: currentKnownSenders()
         )
         let mentions: [String]? = matches.isEmpty ? nil : matches.map(\.name)
-        let payload: MessagePayload = .text(TextMessage(
-            sender: preferences.displayName,
-            body: text,
-            replyTo: replyTo,
-            mentions: mentions,
-            sentAt: now
-        ))
-
-        // Random negative id can't collide with real GitHub ids (which
-        // are always positive 64-bit integers).
         let pendingID = -Int.random(in: 1...Int.max)
         let pendingRow = CachedMessage(
             id: pendingID,
@@ -262,7 +260,28 @@ final class MessageStore {
         )
         modelContext.insert(pendingRow)
         try? modelContext.save()
+        return pendingRow
+    }
 
+    /// Async half of text send: seals the payload, posts to GitHub,
+    /// promotes the pending row to `.text`. On failure deletes the
+    /// pending row and rethrows.
+    func uploadPendingText(_ pendingRow: CachedMessage, text: String, replyTo: String?) async throws {
+        guard let invite = currentInvite, let key = roomKey else {
+            throw SendError.notStarted
+        }
+        let matches = MentionResolver.resolve(
+            in: text,
+            against: currentKnownSenders()
+        )
+        let mentions: [String]? = matches.isEmpty ? nil : matches.map(\.name)
+        let payload: MessagePayload = .text(TextMessage(
+            sender: preferences.displayName,
+            body: text,
+            replyTo: replyTo,
+            mentions: mentions,
+            sentAt: pendingRow.sentAt
+        ))
         do {
             let envelope = try crypto.seal(payload, with: key)
             let wire = try envelope.encodeForWire()

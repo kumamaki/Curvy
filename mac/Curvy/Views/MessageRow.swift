@@ -30,11 +30,26 @@ struct MessageRow: View {
     let mentionResolutions: [MentionMatch]
     let mySender: String
     let reactionNamespace: Namespace.ID
+    /// Shared namespace for the send-button → bubble morph. When
+    /// `morphingPendingID == message.id` and this is an outgoing
+    /// row, the bubble's tinted background acts as the destination
+    /// of a `matchedGeometryEffect` whose source lives in
+    /// `MessageComposer`. SwiftUI animates the frame from the
+    /// send-button position to this bubble's natural position —
+    /// the "bubble grows from the send button" iMessage motion.
+    let sendMorphNamespace: Namespace.ID
+    let morphingPendingID: Int?
     /// True for the brief (~1s) flash after a sibling row's reply
     /// chip jumped the scroll here. Drives a transient overlay on
     /// the bubble so the eye can find what it was navigated to —
     /// same affordance Slack/iMessage use after a thread jump.
     let isHighlighted: Bool
+    /// True when this bubble is the last in its consecutive sender run.
+    /// Gates the tail corner (only the bottom bubble gets the 4pt
+    /// asymmetric corner) and the hover-reveal timestamp — matching
+    /// iMessage's grouping affordance where mid-group bubbles are
+    /// fully round and anonymous.
+    let isLastInGroup: Bool
     let onReply: (CachedMessage) -> Void
     let onCopy: () -> Void
     /// Fires when the user taps this row's inline reply chip. Parent
@@ -116,16 +131,27 @@ struct MessageRow: View {
     // MARK: - Transitions
 
     /// Incoming bubbles "land" gently from just below — communicates
-    /// *this arrived*. Outgoing bubbles "pop" from the bottom-trailing
-    /// corner (where the send button sits) — a scale-up from 0.7
-    /// anchored at the composer side, paired with the prior rows'
-    /// push-up. Together they read as iMessage's single
-    /// "the-bubble-came-from-the-send-button" gesture.
+    /// *this arrived*. Outgoing bubbles rise in from below the
+    /// composer edge (where the safe-area inset sits) so the bubble
+    /// appears to emerge from behind the composer, paired with the
+    /// viewport's snap-to-bottom. The scroll snap is intentionally
+    /// near-instant so this transition is the visible motion.
     private var insertionTransition: AnyTransition {
         guard !reduceMotion else { return .opacity }
         if isMine {
-            return .scale(scale: 0.7, anchor: .bottomTrailing)
-                .combined(with: .opacity)
+            // When the row is the matched-geometry destination
+            // (`isMorphing`), the morph itself is the entrance —
+            // adding a scale/offset transition would fight the
+            // matched frame interpolation and look broken.
+            if isMorphing {
+                return .opacity
+            }
+            return .asymmetric(
+                insertion: .scale(scale: 0.4, anchor: .bottomTrailing)
+                    .combined(with: .offset(y: 24))
+                    .combined(with: .opacity),
+                removal: .opacity
+            )
         }
         return .offset(y: 6).combined(with: .opacity)
     }
@@ -241,7 +267,7 @@ struct MessageRow: View {
             HStack(spacing: 6) {
                 if isMine {
                     timestampText
-                        .opacity(isHovered ? 1 : 0)
+                        .opacity(isHovered && isLastInGroup ? 1 : 0)
                         .animation(reduceMotion ? .linear(duration: 0) : .easeInOut(duration: 0.15), value: isHovered)
                     reactButton
                     replyButton
@@ -273,7 +299,7 @@ struct MessageRow: View {
                     replyButton
                     reactButton
                     timestampText
-                        .opacity(isHovered ? 1 : 0)
+                        .opacity(isHovered && isLastInGroup ? 1 : 0)
                         .animation(reduceMotion ? .linear(duration: 0) : .easeInOut(duration: 0.15), value: isHovered)
                 }
             }
@@ -648,8 +674,8 @@ struct MessageRow: View {
     private var bubbleShape: UnevenRoundedRectangle {
         UnevenRoundedRectangle(
             topLeadingRadius: bubbleCorner,
-            bottomLeadingRadius: isMine ? bubbleCorner : bubbleTailCorner,
-            bottomTrailingRadius: isMine ? bubbleTailCorner : bubbleCorner,
+            bottomLeadingRadius: (!isMine && isLastInGroup) ? bubbleTailCorner : bubbleCorner,
+            bottomTrailingRadius: (isMine && isLastInGroup) ? bubbleTailCorner : bubbleCorner,
             topTrailingRadius: bubbleCorner,
             style: .continuous
         )
@@ -661,15 +687,34 @@ struct MessageRow: View {
     /// Mine = brand orange; others = solid black, for high contrast
     /// on the glass window background and to lean away from the
     /// orange-everywhere look.
+    @ViewBuilder
     private var bubbleBackground: some View {
-        UnevenRoundedRectangle(
+        let shape = UnevenRoundedRectangle(
             topLeadingRadius: bubbleCorner,
-            bottomLeadingRadius: isMine ? bubbleCorner : bubbleTailCorner,
-            bottomTrailingRadius: isMine ? bubbleTailCorner : bubbleCorner,
+            bottomLeadingRadius: (!isMine && isLastInGroup) ? bubbleTailCorner : bubbleCorner,
+            bottomTrailingRadius: (isMine && isLastInGroup) ? bubbleTailCorner : bubbleCorner,
             topTrailingRadius: bubbleCorner,
             style: .continuous
         )
         .fill(isMine ? AnyShapeStyle(.tint) : AnyShapeStyle(Color.curvyInk))
+        if isMorphing {
+            shape.matchedGeometryEffect(
+                id: "sendMorph",
+                in: sendMorphNamespace,
+                isSource: false
+            )
+        } else {
+            shape
+        }
+    }
+
+    /// True when this row is the destination of an in-flight
+    /// send-button → bubble morph. Gated on `isMine` so incoming rows
+    /// never participate, and on `message.id` matching the parent's
+    /// `morphingPendingID` — only one row at a time can be the
+    /// destination.
+    private var isMorphing: Bool {
+        isMine && morphingPendingID != nil && morphingPendingID == message.id
     }
 
     /// Reply quote rendered as a "header section" inside the bubble's
@@ -842,6 +887,7 @@ extension MessageRow: @MainActor Equatable {
             && lhs.reactions == rhs.reactions
             && lhs.mentionResolutions == rhs.mentionResolutions
             && lhs.isHighlighted == rhs.isHighlighted
+            && lhs.isLastInGroup == rhs.isLastInGroup
     }
 }
 
