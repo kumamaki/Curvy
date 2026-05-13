@@ -116,14 +116,16 @@ struct MessageRow: View {
     // MARK: - Transitions
 
     /// Incoming bubbles "land" gently from just below — communicates
-    /// *this arrived*. Outgoing bubbles materialize as `.identity`
-    /// because the optimistic UI is the entire feedback story (the
-    /// pending bubble appears the moment the user taps send), so an
-    /// entrance animation on top would feel redundant.
+    /// *this arrived*. Outgoing bubbles "pop" from the bottom-trailing
+    /// corner (where the send button sits) — a scale-up from 0.7
+    /// anchored at the composer side, paired with the prior rows'
+    /// push-up. Together they read as iMessage's single
+    /// "the-bubble-came-from-the-send-button" gesture.
     private var insertionTransition: AnyTransition {
         guard !reduceMotion else { return .opacity }
         if isMine {
-            return .identity
+            return .scale(scale: 0.7, anchor: .bottomTrailing)
+                .combined(with: .opacity)
         }
         return .offset(y: 6).combined(with: .opacity)
     }

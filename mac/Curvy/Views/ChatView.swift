@@ -23,22 +23,18 @@ struct ChatView: View {
     @State private var draftText: String = ""
     @State private var imageDraft: ImagePipeline.Prepared?
     @State private var replyingTo: CachedMessage?
-    // Initialized to `.bottom` so the very first layout pass asks
-    // the ScrollView to anchor at the end — equivalent intent to
-    // `.defaultScrollAnchor(.bottom)` but routed through the
-    // imperative `ScrollPosition` API, which (per Apple's own forum
-    // guidance) is the only reliable path with `LazyVStack`. The
-    // declarative `defaultScrollAnchor` is known to leave a blank
-    // viewport with lazy content until the user scrolls.
+    // Imperative scroll API for jump-to-latest, jump-to-parent, and
+    // post-prepend restore. Initialized to `.bottom` so the very first
+    // layout pass anchors at the end with no visible scroll motion —
+    // reliable under VStack (the historic LazyVStack blank-viewport
+    // bug doesn't apply).
     @State private var scrollPosition = ScrollPosition(idType: PersistentIdentifier.self, edge: .bottom)
     @State private var isPinnedToBottom: Bool = true
-    // Flips true on the first geometry tick that confirms the cold-load
-    // seed actually landed at the bottom (gap <= 1pt). Until then the
-    // message list renders at opacity 0 — the user never sees the
-    // documented LazyVStack-blank-viewport flash, never sees the seed's
-    // own scrollTo motion, never sees a half-laid-out top-of-stack.
-    // After the flip, this also gates the auto-follow handler so it
-    // can't fire before the seed itself has run.
+    // Flips true the first time `cachedRows` becomes non-empty. Used to
+    // gate the push-up animation (the initial cold-load shouldn't
+    // animate — it's not an insert, it's the world appearing) and the
+    // jump-to-latest pill (which would otherwise flash on cold load
+    // before scroll geometry settles).
     @State private var didSeed: Bool = false
     // One-shot override of `isPinnedToBottom` for the next bubble that
     // arrives. Set by `send()` so my own outgoing message yanks me to
@@ -413,11 +409,6 @@ struct ChatView: View {
             .padding(.bottom, 8)
             .scrollTargetLayout()
         }
-        // Hide the list until the seed lands. Avoids the documented
-        // blank-viewport flash where LazyVStack measures empty until
-        // the first `scrollTo(id:)` materializes rows. We're hiding
-        // the rendering, not unmounting it — measurement still runs.
-        .opacity(didSeed ? 1 : 0)
         .scrollPosition($scrollPosition, anchor: .bottom)
         .softScrollEdges()
         .onChange(of: cachedRows.last?.id, initial: true) { _, newID in
@@ -439,13 +430,19 @@ struct ChatView: View {
                 && nextTailID != nil
                 && previousTailID != nextTailID
             if isTailInsert, !reduceMotion {
-                withAnimation(.snappy(duration: 0.32, extraBounce: 0.08)) {
+                withAnimation(.spring(response: 0.42, dampingFraction: 0.72)) {
                     cachedRows = nextRows
                 }
             } else {
                 cachedRows = nextRows
             }
             cachedKnownSenders = knownSenders
+            // Flip the seed flag the first time rows materialize. Gates
+            // the push-up animation (initial cold-load is not a tail
+            // insert) and the jump-to-latest pill.
+            if !didSeed, !cachedRows.isEmpty {
+                didSeed = true
+            }
             // After loading older messages, scroll back to where the
             // user was so the newly-prepended rows appear above them.
             if let anchorID, cachedRows.contains(where: { $0.id == anchorID }) {
@@ -466,7 +463,6 @@ struct ChatView: View {
         } action: { _, snap in
             handleScrollEdgeState(snap)
         }
-        .task { await fallbackReveal() }
         .task(id: highlightedID) { await clearHighlightAfterDelay() }
         .overlay(alignment: .bottom) { jumpToLatestOverlay }
         .overlay(alignment: .top) { updateAvailableOverlay }
@@ -526,56 +522,44 @@ struct ChatView: View {
         )
     }
 
-    /// Auto-follow handler. Runs on `rows.last?.id` change with
-    /// `initial: true`, so the very first non-nil id triggers the
-    /// cold-load seed branch. Subsequent fires are steady-state
-    /// auto-follow gated on `forceFollowNextBubble || isPinnedToBottom`
-    /// — non-following arrivals bump the unread counter that drives
-    /// the jump-to-latest pill.
+    /// Auto-follow handler. Runs on `rows.last?.id` change. Steady-state
+    /// auto-follow is gated on `forceFollowNextBubble || isPinnedToBottom`
+    /// — non-following arrivals bump the unread counter that drives the
+    /// jump-to-latest pill.
     ///
-    /// Cold-load seed uses id-based `scrollTo(id:anchor:)` rather than
-    /// `scrollTo(edge:)`. id-based forces LazyVStack to materialize
-    /// the target row, the documented fix for the blank-viewport bug
-    /// — `edge:` only goes to the bottom of currently-laid-out content,
-    /// which on cold load is the top of the stack.
+    /// For own-send, `send()` already pinned the position to the
+    /// bottom edge synchronously — the scrollPosition tracks the
+    /// growing content automatically, so this handler is a no-op on
+    /// the follow path. For incoming bubbles we explicitly smooth-scroll
+    /// to keep the new arrival in view.
     private func handleLastBubbleChange(_ newID: PersistentIdentifier?) {
         guard let newID else { return }
-        if !didSeed {
-            var t = Transaction()
-            t.disablesAnimations = true
-            withTransaction(t) {
-                scrollPosition.scrollTo(id: newID, anchor: .bottom)
-            }
+        let isOwnSend = forceFollowNextBubble
+        let shouldFollow = forceFollowNextBubble || isPinnedToBottom
+        forceFollowNextBubble = false
+        guard shouldFollow else {
+            if didSeed { unreadInScrollback += 1 }
             return
         }
-        let shouldFollow = forceFollowNextBubble || isPinnedToBottom
-        if forceFollowNextBubble {
-            forceFollowNextBubble = false
-        }
-        if shouldFollow {
+        if isOwnSend {
+            // Pre-pinned in send(); ScrollPosition's edge-tracking
+            // keeps the bottom in view as the pending row inserts.
             isProgrammaticallyScrolling = true
-            withAnimation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.22)) {
-                scrollPosition.scrollTo(id: newID, anchor: .bottom)
-            }
-        } else {
-            unreadInScrollback += 1
+            return
+        }
+        isProgrammaticallyScrolling = true
+        withAnimation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.22)) {
+            scrollPosition.scrollTo(id: newID, anchor: .bottom)
         }
     }
 
-    /// Geometry-tick handler. Three responsibilities, all driven from
+    /// Geometry-tick handler. Two responsibilities, both driven from
     /// the single bottom-distance derivation:
-    ///   - first reveal — `atBottomTight` flips `didSeed` so the list
-    ///     fades in once the seed has actually landed.
     ///   - auto-follow gate — `atBottomLoose` mirrors into
     ///     `isPinnedToBottom`. Loose threshold so a few pixels of
     ///     give don't kick the user out of pinned state.
     ///   - unread reset — returning to the bottom clears the pill.
     private func handleScrollEdgeState(_ snap: ScrollEdgeState) {
-        if !didSeed, snap.atBottomTight {
-            withAnimation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.18)) {
-                didSeed = true
-            }
-        }
         if isProgrammaticallyScrolling {
             if snap.atBottomTight {
                 isProgrammaticallyScrolling = false
@@ -604,20 +588,6 @@ struct ChatView: View {
            let anchorID = cachedRows.first?.id {
             needsScrollRestoreID = anchorID
             Task { await store.loadOlderMessages() }
-        }
-    }
-
-    /// Belt-and-suspenders reveal. If the geometry callback never
-    /// observes a bottom-tight tick (zero messages, or some
-    /// unforeseen LazyVStack quirk) we still reveal after 400ms so
-    /// the user never sees a stuck-invisible chat. Whatever scroll
-    /// position we're at when the timer fires is what the user gets.
-    private func fallbackReveal() async {
-        try? await Task.sleep(for: .milliseconds(400))
-        if !didSeed {
-            withAnimation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.18)) {
-                didSeed = true
-            }
         }
     }
 
@@ -690,6 +660,18 @@ struct ChatView: View {
         // and replays a tinted-circle scale+fade behind the send glyph.
         // Cheap, view-local, doesn't touch SwiftData or the row list.
         sendPulseTick &+= 1
+
+        // Pin the viewport to the bottom edge BEFORE the pending row
+        // arrives. This is the load-bearing piece for reliable
+        // own-send scroll — calling `scrollTo` after the row inserts
+        // races with SwiftUI's layout pass and is what was producing
+        // "sometimes works, sometimes doesn't". The ScrollPosition
+        // edge-mode keeps tracking the bottom as content grows below.
+        var snap = Transaction()
+        snap.disablesAnimations = true
+        withTransaction(snap) {
+            scrollPosition.scrollTo(edge: .bottom)
+        }
 
         Task {
             do {

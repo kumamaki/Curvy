@@ -307,7 +307,7 @@ struct MessageComposer: View {
                 // tick and resets — no state to manage in ChatView,
                 // no cross-view machinery, no scroll-perf footprint.
                 Circle()
-                    .fill(.tint)
+                    .stroke(Color.accentColor, lineWidth: 2)
                     .frame(width: 28, height: 28)
                     .keyframeAnimator(
                         initialValue: PulseFrame.idle,
@@ -319,12 +319,12 @@ struct MessageComposer: View {
                     } keyframes: { _ in
                         KeyframeTrack(\.scale) {
                             LinearKeyframe(1.0, duration: 0)
-                            SpringKeyframe(1.6, duration: 0.36, spring: .snappy)
+                            SpringKeyframe(2.0, duration: 0.42, spring: .snappy)
                         }
                         KeyframeTrack(\.opacity) {
                             LinearKeyframe(0.0, duration: 0)
-                            LinearKeyframe(0.45, duration: 0.05)
-                            LinearKeyframe(0.0, duration: 0.34)
+                            LinearKeyframe(0.85, duration: 0.04)
+                            LinearKeyframe(0.0, duration: 0.38)
                         }
                     }
                 Image(systemName: "arrow.up.circle.fill")
