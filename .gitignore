@@ -32,3 +32,6 @@ mac/dist/
 DerivedData/
 /build/
 /dist/
+
+# Instruments trace data + local DuckDB exports — large, gitignored.
+.traces/

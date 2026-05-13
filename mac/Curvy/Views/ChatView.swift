@@ -386,7 +386,17 @@ struct ChatView: View {
 
     private var messageList: some View {
         ScrollView {
-            LazyVStack(spacing: 0) {
+            // VStack rather than LazyVStack: under heavy scroll, LazyVStack
+            // destroys and rematerializes rows aggressively (~1.5× the
+            // total row count per scroll burst in our trace), and each
+            // MessageRow has a deep layout hierarchy (PillFlowLayout,
+            // padding/frame/overlay stacks) that makes materialization
+            // expensive enough to peg the main thread. History is
+            // paginated server-side (50 per page, explicit scroll-to-top
+            // to load more), so in-memory row count stays bounded for the
+            // 4-person room — VStack measures all rows but body
+            // invalidations are rare in steady state.
+            VStack(spacing: 0) {
                 if store.isLoadingOlderMessages {
                     ProgressView()
                         .frame(maxWidth: .infinity)
@@ -396,10 +406,6 @@ struct ChatView: View {
                     messageRowView(for: row)
                         .equatable()
                         .padding(.top, row.isNewGroup ? 12 : 2)
-                        .animation(
-                            reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.22),
-                            value: row.isNewGroup
-                        )
                 }
             }
             .padding(.horizontal, 16)

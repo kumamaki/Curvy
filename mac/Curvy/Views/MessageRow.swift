@@ -107,9 +107,7 @@ struct MessageRow: View {
             }
             .contentShape(Rectangle())
             .onHover { hovering in
-                withAnimation(reduceMotion ? .linear(duration: 0) : .easeInOut(duration: 0.15)) {
-                    isHovered = hovering
-                }
+                isHovered = hovering
             }
             .transition(insertionTransition)
         }
@@ -118,18 +116,14 @@ struct MessageRow: View {
     // MARK: - Transitions
 
     /// Incoming bubbles "land" gently from just below — communicates
-    /// *this arrived*. Outgoing bubbles slide up from the bottom edge
-    /// of the viewport (visually near the send button) with an
-    /// opacity fade-in. Combined with the LazyVStack push-up animation
-    /// driven by `ChatView`'s `withAnimation` around `cachedRows`,
-    /// the prior rows lift to make room while the newcomer rises.
+    /// *this arrived*. Outgoing bubbles materialize as `.identity`
+    /// because the optimistic UI is the entire feedback story (the
+    /// pending bubble appears the moment the user taps send), so an
+    /// entrance animation on top would feel redundant.
     private var insertionTransition: AnyTransition {
         guard !reduceMotion else { return .opacity }
         if isMine {
-            return .asymmetric(
-                insertion: .move(edge: .bottom).combined(with: .opacity),
-                removal: .opacity
-            )
+            return .identity
         }
         return .offset(y: 6).combined(with: .opacity)
     }
@@ -177,6 +171,7 @@ struct MessageRow: View {
         .offset(x: showActions ? 0 : (isMine ? 6 : -6))
         .scaleEffect(isHoveringReply ? 1.08 : 1.0, anchor: .center)
         .animation(reduceMotion ? .linear(duration: 0) : .easeOut(duration: 0.12), value: isHoveringReply)
+        .animation(reduceMotion ? .linear(duration: 0) : .easeInOut(duration: 0.15), value: showActions)
         .onHover { hovering in
             isHoveringReply = hovering
         }
@@ -210,6 +205,7 @@ struct MessageRow: View {
         .offset(x: showActions ? 0 : (isMine ? 6 : -6))
         .scaleEffect(isHoveringReact ? 1.08 : 1.0, anchor: .center)
         .animation(reduceMotion ? .linear(duration: 0) : .easeOut(duration: 0.12), value: isHoveringReact)
+        .animation(reduceMotion ? .linear(duration: 0) : .easeInOut(duration: 0.15), value: showActions)
         .onHover { hovering in
             isHoveringReact = hovering
         }
@@ -242,7 +238,9 @@ struct MessageRow: View {
 
             HStack(spacing: 6) {
                 if isMine {
-                    timestampText.opacity(isHovered ? 1 : 0)
+                    timestampText
+                        .opacity(isHovered ? 1 : 0)
+                        .animation(reduceMotion ? .linear(duration: 0) : .easeInOut(duration: 0.15), value: isHovered)
                     reactButton
                     replyButton
                 }
@@ -272,7 +270,9 @@ struct MessageRow: View {
                 if !isMine {
                     replyButton
                     reactButton
-                    timestampText.opacity(isHovered ? 1 : 0)
+                    timestampText
+                        .opacity(isHovered ? 1 : 0)
+                        .animation(reduceMotion ? .linear(duration: 0) : .easeInOut(duration: 0.15), value: isHovered)
                 }
             }
         }
@@ -509,7 +509,11 @@ struct MessageRow: View {
             .contentShape(bubbleShape)
             .onTapGesture(count: 2) { openQuickLook() }
             .task(id: imageCacheToken) {
-                cachedImage = localImageURL.flatMap { NSImage(contentsOfFile: $0.path) }
+                let url = localImageURL
+                let image = await Task.detached(priority: .userInitiated) {
+                    url.flatMap { NSImage(contentsOfFile: $0.path) }
+                }.value
+                cachedImage = image
             }
             // Reactions-only (no caption): float the badge stack inside
             // the clipped image at the corner opposite the tail, with a
@@ -968,22 +972,38 @@ private struct PillFlowLayout: Layout {
     var horizontalSpacing: CGFloat = 0
     var lineSpacing: CGFloat = 0
 
+    struct CacheData {
+        var idealSizes: [CGSize] = []
+        var lastResult: (maxWidth: CGFloat, frames: [CGRect], totalSize: CGSize)?
+    }
+
+    func makeCache(subviews: Subviews) -> CacheData {
+        CacheData(idealSizes: subviews.map { $0.sizeThatFits(.unspecified) })
+    }
+
+    func updateCache(_ cache: inout CacheData, subviews: Subviews) {
+        if cache.idealSizes.count != subviews.count {
+            cache.idealSizes = subviews.map { $0.sizeThatFits(.unspecified) }
+            cache.lastResult = nil
+        }
+    }
+
     func sizeThatFits(
         proposal: ProposedViewSize,
         subviews: Subviews,
-        cache: inout ()
+        cache: inout CacheData
     ) -> CGSize {
         let maxWidth = proposal.width ?? .infinity
-        return computeLayout(maxWidth: maxWidth, subviews: subviews).totalSize
+        return computeLayout(maxWidth: maxWidth, subviews: subviews, cache: &cache).totalSize
     }
 
     func placeSubviews(
         in bounds: CGRect,
         proposal: ProposedViewSize,
         subviews: Subviews,
-        cache: inout ()
+        cache: inout CacheData
     ) {
-        let layout = computeLayout(maxWidth: bounds.width, subviews: subviews)
+        let layout = computeLayout(maxWidth: bounds.width, subviews: subviews, cache: &cache)
         for (index, frame) in layout.frames.enumerated() {
             subviews[index].place(
                 at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
@@ -995,22 +1015,24 @@ private struct PillFlowLayout: Layout {
 
     private func computeLayout(
         maxWidth: CGFloat,
-        subviews: Subviews
+        subviews: Subviews,
+        cache: inout CacheData
     ) -> (frames: [CGRect], totalSize: CGSize) {
+        if let last = cache.lastResult, last.maxWidth == maxWidth {
+            return (last.frames, last.totalSize)
+        }
         var frames: [CGRect] = []
         var x: CGFloat = 0
         var y: CGFloat = 0
         var lineHeight: CGFloat = 0
         var maxRight: CGFloat = 0
-        for sub in subviews {
-            let idealSize = sub.sizeThatFits(.unspecified)
-            // Wrap to next line if segment doesn't fit and we're not at line start.
+        for (i, sub) in subviews.enumerated() {
+            let idealSize = cache.idealSizes[i]
             if x > 0 && x + idealSize.width > maxWidth {
                 y += lineHeight + lineSpacing
                 x = 0
                 lineHeight = 0
             }
-            // Constrain to remaining line width so Text re-flows vertically.
             let available = maxWidth - x
             let placedWidth = min(idealSize.width, available)
             let placedHeight = placedWidth < idealSize.width
@@ -1021,7 +1043,9 @@ private struct PillFlowLayout: Layout {
             lineHeight = max(lineHeight, placedHeight)
             maxRight = max(maxRight, x - horizontalSpacing)
         }
-        return (frames, CGSize(width: maxRight, height: y + lineHeight))
+        let size = CGSize(width: maxRight, height: y + lineHeight)
+        cache.lastResult = (maxWidth, frames, size)
+        return (frames, size)
     }
 }
 
