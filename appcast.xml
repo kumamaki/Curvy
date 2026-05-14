@@ -13,7 +13,7 @@
             <sparkle:version>1.3.0</sparkle:version>
             <sparkle:shortVersionString>1.3.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/kumamaki/Curvy/releases/download/v1.3.0/Curvy-1.3.0.dmg" length="4355752" type="application/octet-stream" sparkle:edSignature="Kof+afaMaFty7CJmtBOjpXQSG5HXbQRXrLnEksZ0/6CRIxoGUaRNRhXJhCs7R/UWfHlE0nBOUjWUjAAkLAiyCQ=="/>
+            <enclosure url="https://github.com/kumamaki/Curvy/releases/download/v1.3.0/Curvy-1.3.0.dmg" length="4399163" type="application/octet-stream" sparkle:edSignature="wzYo96/2s2DJF+UGwrgPqQVsF4mN4so8dIMk9/YDc2Cp+uuuo2+dOOSTzMgFwcZzo0haOgJbqM4DHnDctjFzCA=="/>
         </item>
         <item>
             <title>1.2.5</title>
