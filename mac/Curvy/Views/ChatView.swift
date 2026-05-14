@@ -25,10 +25,10 @@ struct ChatView: View {
     @State private var replyingTo: CachedMessage?
     // Imperative scroll API for jump-to-latest, jump-to-parent, and
     // post-prepend restore. Initialized to `.bottom` so the very first
-    // layout pass anchors at the end with no visible scroll motion —
-    // reliable under VStack (the historic LazyVStack blank-viewport
-    // bug doesn't apply).
-    @State private var scrollPosition = ScrollPosition(idType: PersistentIdentifier.self, edge: .bottom)
+    // External scroll requests (scene resume, jump-to-latest,
+    // jump-to-parent) route through this state. The onChange inside
+    // ScrollViewReader consumes it and calls proxy.scrollTo.
+    @State private var externalScroll: ExternalScrollRequest?
     @State private var isPinnedToBottom: Bool = true
     // Flips true the first time `cachedRows` becomes non-empty. Used to
     // gate the push-up animation (the initial cold-load shouldn't
@@ -60,14 +60,10 @@ struct ChatView: View {
     @State private var isDropTargeted: Bool = false
     @State private var cachedRows: [RowItem] = []
     @State private var cachedKnownSenders: [String] = []
-    // Set to true while handleLastBubbleChange is animating a scroll to
-    // bottom. Prevents the geometry callback's intermediate ticks from
-    // transiently flipping isPinnedToBottom to false mid-animation,
-    // which would miscount a concurrent new message as unread.
-    @State private var isProgrammaticallyScrolling: Bool = false
     // Set just before triggering `loadOlderMessages()` to the ID of the
-    // top-most visible row. After the prepend lands, `onChange` scrolls
-    // back to this row so the user's reading position stays stable.
+    // top-most visible row. After the prepend lands, `handleMessages-
+    // Change` scrolls back to this row so the user's reading position
+    // stays stable.
     @State private var needsScrollRestoreID: PersistentIdentifier?
 
     /// Shared namespace for the reaction "stick" animation. Picker
@@ -76,20 +72,6 @@ struct ChatView: View {
     /// publishes the matching destination. SwiftUI animates the emoji
     /// between them — same motion iMessage uses on tapback landing.
     @Namespace private var reactionNamespace
-
-    /// Shared namespace for the send-button → bubble morph. The
-    /// tinted capsule behind the send glyph publishes the source;
-    /// the outgoing bubble's tinted background publishes the
-    /// destination when `morphingPendingID == row.id`. SwiftUI
-    /// interpolates the frame so the bubble grows out of the
-    /// send button — the iMessage hero-style motion.
-    @Namespace private var sendMorphNamespace
-    /// Holds the Int id of the pending row currently acting as the
-    /// matched-geometry destination. Set synchronously in `send()`
-    /// right after `insertPendingText`; cleared after the morph
-    /// settles (~500ms) so the matched-geometry binding detaches
-    /// before the network commit flips the row's id.
-    @State private var morphingPendingID: Int?
 
     /// Bumped by `send()` to retrigger the composer's send-button
     /// pulse animation — a tinted Circle behind the icon that scales
@@ -102,7 +84,12 @@ struct ChatView: View {
 
     var body: some View {
         messageList
-            .safeAreaInset(edge: .bottom, spacing: 0) {
+            // 16pt of breathing room between the last scrollable row
+            // and the composer — OUTSIDE the scroll content, so
+            // `proxy.scrollTo(id, anchor: .bottom)` still lands the
+            // row's bottom flush with the viewport bottom (an inner
+            // `.padding(.bottom)` would silently consume the gap).
+            .safeAreaInset(edge: .bottom, spacing: 16) {
                 MessageComposer(
                     draftText: $draftText,
                     imageDraft: $imageDraft,
@@ -110,7 +97,6 @@ struct ChatView: View {
                     shakeTrigger: shakeTrigger,
                     knownSenders: cachedKnownSenders,
                     sendPulseTick: sendPulseTick,
-                    sendMorphNamespace: sendMorphNamespace,
                     onSend: send,
                     onPickError: { _ in shakeTrigger += 1 },
                     onLoadURL: preparePicked(url:),
@@ -151,11 +137,7 @@ struct ChatView: View {
                     // looking at the screen on resume, a sudden
                     // scroll would feel jarring.
                     if wasPinnedAtBackground, let lastID = cachedRows.last?.id {
-                        var t = Transaction()
-                        t.disablesAnimations = true
-                        withTransaction(t) {
-                            scrollPosition.scrollTo(id: lastID, anchor: .bottom)
-                        }
+                        externalScroll = ExternalScrollRequest(id: lastID, anchor: .bottom, animated: false)
                     }
                 } else {
                     wasPinnedAtBackground = isPinnedToBottom
@@ -234,6 +216,8 @@ struct ChatView: View {
     }
 
     private func buildRows() -> [RowItem] {
+        let interval = AppLog.signposter.beginInterval("rows.build", "n=\(messages.count)")
+        defer { AppLog.signposter.endInterval("rows.build", interval) }
         let myName = store.displayName
         let senders = knownSenders
         // Handle map is the same for every row in this snapshot, so
@@ -408,8 +392,6 @@ struct ChatView: View {
             mentionResolutions: row.mentionResolutions,
             mySender: store.displayName,
             reactionNamespace: reactionNamespace,
-            sendMorphNamespace: sendMorphNamespace,
-            morphingPendingID: morphingPendingID,
             isHighlighted: highlightedID == row.id,
             isLastInGroup: row.isLastInGroup,
             onReply: { replyingTo = $0 },
@@ -422,17 +404,14 @@ struct ChatView: View {
     }
 
     private var messageList: some View {
+        // ScrollViewReader so `proxy.scrollTo` is available inside the
+        // single messages.onChange handler. `scrollPosition.scrollTo`
+        // on macOS 26 doesn't animate within `withAnimation` (completes
+        // synchronously, no visible scroll), so all programmatic
+        // scrolls use the proxy API. We still keep `.scrollPosition`
+        // for the geometry-driven pin tracking.
+        ScrollViewReader { proxy in
         ScrollView {
-            // VStack rather than LazyVStack: under heavy scroll, LazyVStack
-            // destroys and rematerializes rows aggressively (~1.5× the
-            // total row count per scroll burst in our trace), and each
-            // MessageRow has a deep layout hierarchy (PillFlowLayout,
-            // padding/frame/overlay stacks) that makes materialization
-            // expensive enough to peg the main thread. History is
-            // paginated server-side (50 per page, explicit scroll-to-top
-            // to load more), so in-memory row count stays bounded for the
-            // 4-person room — VStack measures all rows but body
-            // invalidations are rare in steady state.
             VStack(spacing: 0) {
                 if store.isLoadingOlderMessages {
                     ProgressView()
@@ -446,102 +425,43 @@ struct ChatView: View {
                     messageRowView(for: row)
                         .equatable()
                         .padding(.top, row.separatorDate != nil ? 4 : row.isNewGroup ? 20 : 1)
+                        .id(row.id)
                 }
             }
             .padding(.horizontal, 16)
             .padding(.top, 12)
-            .padding(.bottom, 8)
-            .scrollTargetLayout()
+            // No bottom padding: `proxy.scrollTo(id, anchor: .bottom)`
+            // aligns the row's bottom with the viewport bottom, and
+            // any padding INSIDE `.scrollTargetLayout()` creates an
+            // irrecoverable gap below it. Breathing room comes from
+            // the composer's safe-area inset instead.
         }
-        .scrollPosition($scrollPosition, anchor: .bottom)
+        // defaultScrollAnchor pins the initial viewport to the bottom
+        // on cold launch without any programmatic scrollTo call. No
+        // scrollPosition binding or scrollTargetLayout: those required
+        // SwiftUI to walk all 200 rows per frame to identify which one
+        // was at the anchor, which was O(N) per scroll event.
+        .defaultScrollAnchor(.bottom)
         .softScrollEdges()
-        .onChange(of: cachedRows.last?.id, initial: true) { _, newID in
-            handleLastBubbleChange(newID)
-        }
-        .onChange(of: messages.map(\.id), initial: true) { _, _ in
-            let anchorID = needsScrollRestoreID
-            let previousTailID = cachedRows.last?.id
-            let nextRows = buildRows()
-            let nextTailID = nextRows.last?.id
-            // Push-up: only animate the rebuild when a new bottom row
-            // appeared (and we're past the cold-load seed). Prepends
-            // from `loadOlderMessages` and steady-state updates that
-            // don't move the tail render under no animation — exactly
-            // matching the original intent without wrapping every
-            // scroll-driven body re-eval in an animation transaction.
-            let isTailInsert = didSeed
-                && previousTailID != nil
-                && nextTailID != nil
-                && previousTailID != nextTailID
-            let shouldFollow = isTailInsert && (forceFollowNextBubble || isPinnedToBottom)
-            let isOwnSend = isTailInsert && forceFollowNextBubble
-            if isTailInsert {
-                forceFollowNextBubble = false
-            }
-            AppLog.ui.pub("[rows] rebuild prev=\(cachedRows.count) next=\(nextRows.count) tailChanged=\(previousTailID != nextTailID) didSeed=\(didSeed) isTailInsert=\(isTailInsert) shouldFollow=\(shouldFollow) isOwnSend=\(isOwnSend)")
-            if isTailInsert, !reduceMotion {
-                // Capture the morph id so the completion only clears
-                // *this* morph — a second send firing before this
-                // animation completes will have set a new
-                // `morphingPendingID`, and the new send's own
-                // completion handler will clear that one when its
-                // animation lands.
-                let morphSnapshot = morphingPendingID
-                withAnimation(.spring(response: 0.5, dampingFraction: 0.72)) {
-                    cachedRows = nextRows
-                } completion: {
-                    if morphingPendingID == morphSnapshot {
-                        morphingPendingID = nil
-                        AppLog.ui.pub("[morph] completion → cleared morphingPendingID")
-                    }
-                }
-                if !shouldFollow, didSeed {
-                    unreadInScrollback += 1
+        .onChange(of: externalScroll) { _, req in
+            guard let req else { return }
+            externalScroll = nil
+            if req.animated {
+                withAnimation(.smooth(duration: 0.3)) {
+                    proxy.scrollTo(req.id, anchor: req.anchor)
                 }
             } else {
-                cachedRows = nextRows
+                var t = Transaction(); t.disablesAnimations = true
+                withTransaction(t) { proxy.scrollTo(req.id, anchor: req.anchor) }
             }
-
-            // Defer scrollTo to the next runloop tick. SwiftUI's
-            // layout pass for the newly-inserted row runs between
-            // the cachedRows mutation and this resumption — calling
-            // `scrollTo(edge: .bottom)` here resolves against the
-            // NEW content size, not the stale pre-insert one. That's
-            // load-bearing for reliability: doing it inside the
-            // same `withAnimation` as the row mutation produced
-            // "sometimes scrolls / sometimes doesn't / sometimes
-            // partial" because the bottom edge was being resolved
-            // against whatever content size happened to be measured
-            // at closure-eval time.
-            if shouldFollow {
-                isProgrammaticallyScrolling = true
-                let anim: Animation = reduceMotion
-                    ? .linear(duration: 0)
-                    : .spring(response: 0.4, dampingFraction: 0.82)
-                Task { @MainActor in
-                    await Task.yield()
-                    AppLog.ui.pub("[scroll] deferred scrollTo(edge: .bottom)")
-                    withAnimation(anim) {
-                        scrollPosition.scrollTo(edge: .bottom)
-                    }
-                }
-            }
-            cachedKnownSenders = knownSenders
-            // Flip the seed flag the first time rows materialize. Gates
-            // the push-up animation (initial cold-load is not a tail
-            // insert) and the jump-to-latest pill.
-            if !didSeed, !cachedRows.isEmpty {
-                didSeed = true
-            }
-            // After loading older messages, scroll back to where the
-            // user was so the newly-prepended rows appear above them.
-            if let anchorID, cachedRows.contains(where: { $0.id == anchorID }) {
-                needsScrollRestoreID = nil
-                var t = Transaction()
-                t.disablesAnimations = true
-                withTransaction(t) {
-                    scrollPosition.scrollTo(id: anchorID, anchor: .top)
-                }
+        }
+        // XOR-reduce to a single Int rather than allocating a [Int]
+        // array on every body pass (40×/sec during scroll).
+        // Collisions are astronomically unlikely with monotonically-
+        // increasing GitHub comment IDs; correctness is preserved.
+        .onChange(of: messages.reduce(into: 0) { $0 ^= $1.id }, initial: true) { _, _ in
+            Task { @MainActor in
+                await handleMessagesChange(proxy: proxy)
             }
         }
         .onChange(of: store.displayName) { _, _ in
@@ -564,6 +484,7 @@ struct ChatView: View {
             reduceMotion ? .linear(duration: 0) : .spring(response: 0.3, dampingFraction: 0.78),
             value: updateMonitor.updateAvailable
         )
+        } // ScrollViewReader
     }
 
     /// Whether the jump-to-latest pill should be on screen this tick.
@@ -599,52 +520,117 @@ struct ChatView: View {
         }
     }
 
-    /// Geometry → `ScrollEdgeState` projection. Single tick produces the
-    /// tight (1pt) and loose (80pt) bottom checks plus a near-top (100pt)
-    /// check that triggers history loading.
+    /// Geometry → `ScrollEdgeState` projection. 24pt slack absorbs
+    /// momentum-scroll undershoot and a few pixels of inertial give
+    /// without making the pill linger far above the actual bottom.
+    /// The 100pt near-top threshold triggers history pagination.
     private func scrollEdgeState(_ geometry: ScrollGeometry) -> ScrollEdgeState {
         let gap = geometry.contentSize.height
             - (geometry.contentOffset.y + geometry.containerSize.height)
         return ScrollEdgeState(
-            atBottomTight: gap <= 1,
-            atBottomLoose: gap <= 80,
+            atBottom: gap <= 24,
             nearTop: geometry.contentOffset.y < 100
         )
     }
 
-    /// Tail-id change observer kept around for tracing only. The
-    /// scroll-on-arrival logic now lives inside the messages.onChange
-    /// handler so it can share a single `withAnimation` transaction
-    /// with the cachedRows mutation — two separate transactions
-    /// (one for rows, one for scroll) do NOT coalesce in SwiftUI.
-    private func handleLastBubbleChange(_ newID: PersistentIdentifier?) {
-        AppLog.ui.pub("[tail] change → newID=\(String(describing: newID))")
-    }
+    /// Single entry point for every messages-driven scroll. Phases:
+    ///
+    ///   1. Rebuild `cachedRows` from `messages`. Wrap the mutation in
+    ///      `withAnimation(.pushUp)` when a new tail row appeared, so
+    ///      older rows visibly shift upward.
+    ///   2. `await Task.yield()` — yields one runloop tick so SwiftUI's
+    ///      layout pass commits the new row before the scroll resolves.
+    ///      Without this, `proxy.scrollTo` targets stale geometry and
+    ///      lands short. Not a magic-number delay; a runloop boundary.
+    ///   3. If this is the cold-load seed, an own send, or an incoming
+    ///      bubble while pinned: `proxy.scrollTo(lastID, anchor: .bottom)`.
+    ///      Cold-load path disables animations so the user never sees
+    ///      the snap; send/follow path animates with `SendAnimation.scroll`.
+    ///   4. After history pagination: `proxy.scrollTo(anchorID, anchor: .top)`
+    ///      to restore the user's reading position above the prepend.
+    ///
+    /// `isPinnedToBottom` is set eagerly after scrollTo; the next
+    /// geometry tick corrects us if we somehow didn't land. No fake
+    /// completion handler, no `isProgrammaticallyScrolling` flag —
+    /// pin state is observed, not declared.
+    @MainActor
+    private func handleMessagesChange(proxy: ScrollViewProxy) async {
+        let interval = AppLog.signposter.beginInterval("messages.change")
+        defer { AppLog.signposter.endInterval("messages.change", interval) }
+        let anchorID = needsScrollRestoreID
+        let previousTailID = cachedRows.last?.id
+        let nextRows = buildRows()
+        let nextTailID = nextRows.last?.id
+        let isTailInsert = didSeed
+            && previousTailID != nil
+            && nextTailID != nil
+            && previousTailID != nextTailID
+        let shouldFollow = isTailInsert && (forceFollowNextBubble || isPinnedToBottom)
+        if isTailInsert {
+            forceFollowNextBubble = false
+        }
 
-    /// Geometry-tick handler. Two responsibilities, both driven from
-    /// the single bottom-distance derivation:
-    ///   - auto-follow gate — `atBottomLoose` mirrors into
-    ///     `isPinnedToBottom`. Loose threshold so a few pixels of
-    ///     give don't kick the user out of pinned state.
-    ///   - unread reset — returning to the bottom clears the pill.
-    private func handleScrollEdgeState(_ snap: ScrollEdgeState) {
-        if isProgrammaticallyScrolling {
-            if snap.atBottomTight {
-                AppLog.ui.pub("[geom] programmatic-scroll landed at bottom → isPinned=true")
-                isProgrammaticallyScrolling = false
-                isPinnedToBottom = true
+        AppLog.ui.pub("[rows] rebuild prev=\(cachedRows.count) next=\(nextRows.count) tailChanged=\(previousTailID != nextTailID) didSeed=\(didSeed) isTailInsert=\(isTailInsert) shouldFollow=\(shouldFollow)")
+
+        if isTailInsert, !reduceMotion {
+            withAnimation(SendAnimation.pushUp) {
+                cachedRows = nextRows
             }
-            // Skip the normal isPinnedToBottom update while mid-animation.
-            // Intermediate geometry ticks during the scroll would otherwise
-            // transiently set isPinnedToBottom = false, causing the next
-            // concurrent arrival to be miscounted as unread.
+            if !shouldFollow {
+                unreadInScrollback += 1
+            }
         } else {
-            if isPinnedToBottom != snap.atBottomLoose {
-                AppLog.ui.pub("[geom] isPinned flip \(isPinnedToBottom) → \(snap.atBottomLoose)")
-                isPinnedToBottom = snap.atBottomLoose
+            cachedRows = nextRows
+        }
+        cachedKnownSenders = knownSenders
+
+        let wasFirstLoad = !didSeed && !cachedRows.isEmpty
+        if wasFirstLoad {
+            didSeed = true
+        }
+
+        // Yield once so SwiftUI commits layout for the row mutation
+        // above. proxy.scrollTo called inline here resolves against
+        // pre-mutation geometry and lands short.
+        await Task.yield()
+
+        if (shouldFollow || wasFirstLoad), let lastID = nextTailID {
+            if wasFirstLoad || reduceMotion {
+                var t = Transaction()
+                t.disablesAnimations = true
+                withTransaction(t) {
+                    proxy.scrollTo(lastID, anchor: .bottom)
+                }
+                AppLog.ui.pub("[scroll] instant → \(lastID)")
+            } else {
+                AppLog.ui.pub("[scroll] animated → \(lastID)")
+                withAnimation(SendAnimation.scroll) {
+                    proxy.scrollTo(lastID, anchor: .bottom)
+                }
+            }
+            isPinnedToBottom = true
+        }
+
+        if let anchorID, cachedRows.contains(where: { $0.id == anchorID }) {
+            needsScrollRestoreID = nil
+            var t = Transaction()
+            t.disablesAnimations = true
+            withTransaction(t) {
+                proxy.scrollTo(anchorID, anchor: .top)
             }
         }
-        if snap.atBottomLoose, unreadInScrollback != 0 {
+    }
+
+    /// Geometry tick → `isPinnedToBottom` mirror + unread reset +
+    /// near-top history pagination trigger. No suppression flag: if a
+    /// programmatic scroll briefly flips us off-bottom mid-spring,
+    /// the next tick at `atBottom=true` restores pin and clears unread.
+    private func handleScrollEdgeState(_ snap: ScrollEdgeState) {
+        if isPinnedToBottom != snap.atBottom {
+            AppLog.ui.pub("[geom] isPinned flip \(isPinnedToBottom) → \(snap.atBottom)")
+            isPinnedToBottom = snap.atBottom
+        }
+        if snap.atBottom, unreadInScrollback != 0 {
             unreadInScrollback = 0
         }
         // Trigger history load when the user scrolls near the top.
@@ -676,25 +662,17 @@ struct ChatView: View {
     }
 
     /// Pill-tap action. Jump to the latest bubble with an animated
-    /// scroll. Geometry callback observes the resulting `atBottomLoose`
+    /// scroll. Geometry callback observes the resulting `atBottom`
     /// and resets `unreadInScrollback` to zero, which dismisses the
     /// pill via the `pillVisible` predicate.
     private func jumpToLatest() {
         guard let lastID = cachedRows.last?.id else { return }
-        withAnimation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.28)) {
-            scrollPosition.scrollTo(id: lastID, anchor: .bottom)
-        }
+        externalScroll = ExternalScrollRequest(id: lastID, anchor: .bottom, animated: !reduceMotion)
     }
 
-    /// Tap-to-jump from a reply chip. Centers the parent in the
-    /// viewport and sets `highlightedID` so the row flashes briefly.
-    /// The `.task(id: highlightedID)` modifier on `messageList`
-    /// clears the highlight after ~1s.
     private func jumpToParent(_ target: CachedMessage) {
         let pid = target.persistentModelID
-        withAnimation(reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.32)) {
-            scrollPosition.scrollTo(id: pid, anchor: .center)
-        }
+        externalScroll = ExternalScrollRequest(id: pid, anchor: .center, animated: !reduceMotion)
         highlightedID = pid
     }
 
@@ -753,16 +731,6 @@ struct ChatView: View {
             }
         } else {
             syncInserted = nil
-        }
-
-        // Light up the matched-geometry destination on the new row.
-        // The clear is driven by the cachedRows-mutating
-        // `withAnimation(_:) completion:` in `messages.onChange` —
-        // the morph ends exactly when the animation that's driving
-        // it ends, no magic timer.
-        if let inserted = syncInserted, !reduceMotion {
-            morphingPendingID = inserted.id
-            AppLog.ui.pub("[send] morphingPendingID=\(inserted.id)")
         }
 
         Task {
@@ -965,13 +933,21 @@ private struct RowItem: Identifiable {
     var id: PersistentIdentifier { message.persistentModelID }
 }
 
-/// Three thresholds derived from one geometry tick:
-///   - `atBottomTight`  — flush at bottom; gates first-reveal
-///   - `atBottomLoose`  — within 80pt; gates auto-follow and unread reset
-///   - `nearTop`        — within 100pt of top; triggers history load
+/// Programmatic scroll request for operations outside the ScrollViewReader
+/// scope (scene resume, jump-to-latest pill, reply-chip jump). Set on
+/// `externalScroll` state; consumed by the onChange inside the reader.
+private struct ExternalScrollRequest: Equatable {
+    let id: PersistentIdentifier
+    let anchor: UnitPoint
+    let animated: Bool
+}
+
+/// Two thresholds derived from one geometry tick:
+///   - `atBottom`  — within 24pt of bottom; gates auto-follow,
+///                   pin state, and unread reset
+///   - `nearTop`   — within 100pt of top; triggers history load
 private struct ScrollEdgeState: Equatable {
-    let atBottomTight: Bool
-    let atBottomLoose: Bool
+    let atBottom: Bool
     let nearTop: Bool
 }
 

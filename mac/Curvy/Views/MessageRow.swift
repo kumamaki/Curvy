@@ -30,15 +30,6 @@ struct MessageRow: View {
     let mentionResolutions: [MentionMatch]
     let mySender: String
     let reactionNamespace: Namespace.ID
-    /// Shared namespace for the send-button → bubble morph. When
-    /// `morphingPendingID == message.id` and this is an outgoing
-    /// row, the bubble's tinted background acts as the destination
-    /// of a `matchedGeometryEffect` whose source lives in
-    /// `MessageComposer`. SwiftUI animates the frame from the
-    /// send-button position to this bubble's natural position —
-    /// the "bubble grows from the send button" iMessage motion.
-    let sendMorphNamespace: Namespace.ID
-    let morphingPendingID: Int?
     /// True for the brief (~1s) flash after a sibling row's reply
     /// chip jumped the scroll here. Drives a transient overlay on
     /// the bubble so the eye can find what it was navigated to —
@@ -81,6 +72,16 @@ struct MessageRow: View {
     @State private var jumboScale: CGFloat = 1.0
     @State private var jumboRotation: Double = 0
     @State private var jumboOffset: CGFloat = 0
+    /// Per-row outgoing-bubble entrance. Flips false → true on
+    /// `.onAppear` if the row is a fresh own-send (`sentAt` within
+    /// 2s). While false the bubble renders at scale 0.7 / opacity 0
+    /// anchored bottom-trailing; the onAppear runs `withAnimation`
+    /// with a delayed spring so the visual change starts after the
+    /// viewport's scroll-up settles. Per-row state is more reliable
+    /// than `.transition(...).animation(...)` overrides — that path
+    /// is known fragile across SwiftUI versions when the parent
+    /// drives a wrapping withAnimation on the cachedRows mutation.
+    @State private var entranceSettled: Bool = false
 
     private let bubbleCorner: CGFloat = 16
     private let bubbleTailCorner: CGFloat = 4
@@ -124,7 +125,47 @@ struct MessageRow: View {
             .onHover { hovering in
                 isHovered = hovering
             }
+            .scaleEffect(entranceScale, anchor: .bottomTrailing)
+            .opacity(entranceOpacity)
+            .onAppear { playEntranceIfFresh() }
             .transition(insertionTransition)
+        }
+    }
+
+    /// True for an outgoing bubble within 2s of `sentAt` that hasn't
+    /// yet played its entrance. Historical rows (cold load, older-page
+    /// fetches) skip the animation entirely.
+    private var isEntranceCandidate: Bool {
+        isMine && !reduceMotion && abs(message.sentAt.timeIntervalSinceNow) < SendAnimation.entranceMaxAge
+    }
+
+    // Short-circuit on `entranceSettled` first so once a row has
+    // settled (every visible row after first appear), we skip the
+    // `Date.timeIntervalSinceNow` computation that `isEntranceCandidate`
+    // performs. Otherwise each body re-eval would do two date diffs
+    // per row — multiplied by 200 rows that's noticeable during scroll.
+    private var entranceScale: CGFloat {
+        if entranceSettled { return 1.0 }
+        return isEntranceCandidate ? 0.7 : 1.0
+    }
+
+    private var entranceOpacity: Double {
+        if entranceSettled { return 1.0 }
+        return isEntranceCandidate ? 0.0 : 1.0
+    }
+
+    private func playEntranceIfFresh() {
+        guard isEntranceCandidate, !entranceSettled else {
+            entranceSettled = true
+            return
+        }
+        AppLog.ui.pub("[entrance] play msg=\(message.id)")
+        // Delay so the entrance plays *after* the viewport snap
+        // finishes — otherwise the bubble animates while still
+        // offscreen behind the composer's safe-area inset and the
+        // user sees nothing.
+        withAnimation(SendAnimation.entrance.delay(SendAnimation.entranceDelay)) {
+            entranceSettled = true
         }
     }
 
@@ -138,21 +179,12 @@ struct MessageRow: View {
     /// near-instant so this transition is the visible motion.
     private var insertionTransition: AnyTransition {
         guard !reduceMotion else { return .opacity }
-        if isMine {
-            // When the row is the matched-geometry destination
-            // (`isMorphing`), the morph itself is the entrance —
-            // adding a scale/offset transition would fight the
-            // matched frame interpolation and look broken.
-            if isMorphing {
-                return .opacity
-            }
-            return .asymmetric(
-                insertion: .scale(scale: 0.4, anchor: .bottomTrailing)
-                    .combined(with: .offset(y: 24))
-                    .combined(with: .opacity),
-                removal: .opacity
-            )
-        }
+        // Outgoing rows: `.identity` — the per-row `onAppear` +
+        // `entranceSettled` state drives the scale/opacity entrance.
+        // Using a real `.transition` here would race with the per-row
+        // animation. Incoming rows still need their own transition
+        // since they don't get the onAppear-driven entrance.
+        if isMine { return .identity }
         return .offset(y: 6).combined(with: .opacity)
     }
 
@@ -366,6 +398,12 @@ struct MessageRow: View {
                 }
             }
             .clipShape(bubbleShape)
+            // clipShape sets the hit-test boundary to the clip shape,
+            // causing UnevenRoundedRectangle.path to be computed on
+            // every scroll hit-test for every visible bubble. Override
+            // back to a cheap rect — interaction is already bounded by
+            // the outer HStack's contentShape(Rectangle()) at row level.
+            .contentShape(Rectangle())
         }
     }
 
@@ -534,7 +572,11 @@ struct MessageRow: View {
                 .background(.fill.quaternary)
             }
             .clipShape(bubbleShape)
-            .contentShape(bubbleShape)
+            // Rectangle for hit-testing: the shape path is only needed
+            // for the visual clip. Using bubbleShape here forces SwiftUI
+            // to compute the UnevenRoundedRectangle path on every scroll
+            // hit-test, which is measurably hot at 200 bubbles.
+            .contentShape(Rectangle())
             .onTapGesture(count: 2) { openQuickLook() }
             .task(id: imageCacheToken) {
                 let url = localImageURL
@@ -687,9 +729,8 @@ struct MessageRow: View {
     /// Mine = brand orange; others = solid black, for high contrast
     /// on the glass window background and to lean away from the
     /// orange-everywhere look.
-    @ViewBuilder
     private var bubbleBackground: some View {
-        let shape = UnevenRoundedRectangle(
+        UnevenRoundedRectangle(
             topLeadingRadius: bubbleCorner,
             bottomLeadingRadius: (!isMine && isLastInGroup) ? bubbleTailCorner : bubbleCorner,
             bottomTrailingRadius: (isMine && isLastInGroup) ? bubbleTailCorner : bubbleCorner,
@@ -697,24 +738,6 @@ struct MessageRow: View {
             style: .continuous
         )
         .fill(isMine ? AnyShapeStyle(.tint) : AnyShapeStyle(Color.curvyInk))
-        if isMorphing {
-            shape.matchedGeometryEffect(
-                id: "sendMorph",
-                in: sendMorphNamespace,
-                isSource: false
-            )
-        } else {
-            shape
-        }
-    }
-
-    /// True when this row is the destination of an in-flight
-    /// send-button → bubble morph. Gated on `isMine` so incoming rows
-    /// never participate, and on `message.id` matching the parent's
-    /// `morphingPendingID` — only one row at a time can be the
-    /// destination.
-    private var isMorphing: Bool {
-        isMine && morphingPendingID != nil && morphingPendingID == message.id
     }
 
     /// Reply quote rendered as a "header section" inside the bubble's

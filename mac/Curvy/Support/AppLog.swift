@@ -37,6 +37,13 @@ enum AppLog {
     static let ql      = Logger(subsystem: subsystem, category: "QL")
     /// ChatView scroll: position save/restore, anchor decisions.
     static let ui      = Logger(subsystem: subsystem, category: "UI")
+
+    /// Performance signposts. Visible in Instruments → "Points of
+    /// Interest" track when recording with the SwiftUI / Time Profiler
+    /// templates. Use `Signpost.scroll`, `Signpost.rowsBuild`, etc.
+    /// Begin/end intervals via `OSSignposter.beginInterval` /
+    /// `endInterval`.
+    static let signposter = OSSignposter(subsystem: subsystem, category: .pointsOfInterest)
 }
 
 extension Logger {
