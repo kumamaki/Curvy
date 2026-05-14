@@ -100,11 +100,6 @@ if [[ -z "$REMOTE_HEAD" ]]; then
 fi
 
 if [[ "$GITBUTLER_MODE" -eq 1 ]]; then
-  # Tag origin/main directly. Anything not yet there has to be landed
-  # first (`but land <branch>`); we won't push the workspace meta-commit.
-  TAG_TARGET="$REMOTE_HEAD"
-  TAG_TARGET_LABEL="$REMOTE/main"
-
   # Refuse to ship if the workspace has commits that aren't on origin/main.
   # We'd otherwise tag origin/main behind the user's back, releasing a
   # state that excludes their applied virtual branches. The workspace
@@ -121,12 +116,12 @@ if [[ "$GITBUTLER_MODE" -eq 1 ]]; then
 else
   LOCAL_HEAD="$(git rev-parse HEAD)"
   if [[ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]]; then
-    AHEAD="$(git rev-list --count "$REMOTE/main"..HEAD)"
     BEHIND="$(git rev-list --count HEAD.."$REMOTE/main")"
     if [[ "$BEHIND" -gt 0 ]]; then
       echo "release.sh: local main is behind $REMOTE/main by $BEHIND commit(s) — pull first" >&2
       exit 1
     fi
+    AHEAD="$(git rev-list --count "$REMOTE/main"..HEAD)"
     if [[ "$WILL_PUSH" -ne 1 ]]; then
       echo "release.sh: local main is $AHEAD commit(s) ahead of $REMOTE/main" >&2
       echo "  Pass --push or --confirm to auto-push commits, or push manually first." >&2
@@ -134,10 +129,19 @@ else
     fi
     echo "Pushing $AHEAD unpublished commit(s) to $REMOTE/main..."
     git push "$REMOTE" main
+    # Re-read after push — GitButler rewrites commit SHAs on the remote,
+    # so the canonical tag target may differ from the local HEAD we pushed.
+    REMOTE_HEAD="$(git rev-parse "$REMOTE/main")"
   fi
-  TAG_TARGET="$LOCAL_HEAD"
-  TAG_TARGET_LABEL="HEAD"
 fi
+
+# Always tag the canonical origin/main commit. GitButler rewrites commits on
+# push (adds gitbutler-headers-version metadata), so local SHAs diverge from
+# remote SHAs. Tagging HEAD would create a tag pointing at a pre-rewrite object
+# that disagrees with origin — causing "would clobber existing tag" on the next
+# `git fetch --tags`.
+TAG_TARGET="$REMOTE_HEAD"
+TAG_TARGET_LABEL="$REMOTE/main"
 
 if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
   echo "release.sh: tag '$TAG' already exists locally" >&2
