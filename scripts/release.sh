@@ -91,7 +91,7 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
-git fetch "$REMOTE" main --tags --quiet
+git fetch "$REMOTE" main --quiet
 
 REMOTE_HEAD="$(git rev-parse "$REMOTE/main" 2>/dev/null || echo "")"
 if [[ -z "$REMOTE_HEAD" ]]; then
@@ -138,8 +138,7 @@ fi
 # Always tag the canonical origin/main commit. GitButler rewrites commits on
 # push (adds gitbutler-headers-version metadata), so local SHAs diverge from
 # remote SHAs. Tagging HEAD would create a tag pointing at a pre-rewrite object
-# that disagrees with origin — causing "would clobber existing tag" on the next
-# `git fetch --tags`.
+# that disagrees with origin — causing "would clobber existing tag" on fetch.
 TAG_TARGET="$REMOTE_HEAD"
 TAG_TARGET_LABEL="$REMOTE/main"
 

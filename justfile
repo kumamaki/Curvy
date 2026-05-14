@@ -58,7 +58,7 @@ nuke-keychain:
 package:
     #!/usr/bin/env bash
     set -euo pipefail
-    git fetch --tags --quiet 2>/dev/null || true
+    git fetch origin main --quiet 2>/dev/null || true
     latest=$(git tag --list 'v*' --sort=-version:refname | head -1)
     latest=${latest:-v0.0.0}
     if ! [[ "${latest#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -135,7 +135,7 @@ ship kind:
       major|minor|patch) ;;
       *) echo "usage: just ship <major|minor|patch>" >&2; exit 2 ;;
     esac
-    git fetch origin main --tags --quiet
+    git fetch origin main --quiet
     target=$(git rev-parse origin/main)
     # --merged origin/main filters tags not reachable from our main
     # (defensive against stale upstream tags). Falls back to v0.0.0 for
