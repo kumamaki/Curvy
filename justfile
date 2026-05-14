@@ -142,10 +142,14 @@ ship kind:
     # the first-ever release.
     latest="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --merged origin/main --sort=-version:refname | head -1)"
     latest="${latest:-v0.0.0}"
-    # No-op release guard: if origin/main is already at the latest tag,
-    # bumping would create a new tag pointing at the same commit.
+    # No-op release guard: if origin/main is already at the latest tag AND
+    # there are no local commits to push, bumping would tag the same commit twice.
+    # If local HEAD is ahead of origin/main, release.sh --confirm will push
+    # those commits first, so we skip the guard and let it proceed.
+    ahead="$(git rev-list --count origin/main..HEAD)"
     if git rev-parse -q --verify "refs/tags/${latest}" >/dev/null \
-       && [ "$(git rev-parse "${latest}^{commit}")" = "${target}" ]; then
+       && [ "$(git rev-parse "${latest}^{commit}")" = "${target}" ] \
+       && [ "${ahead}" -eq 0 ]; then
       echo "origin/main is already tagged ${latest} — land new commits before shipping" >&2
       exit 1
     fi
