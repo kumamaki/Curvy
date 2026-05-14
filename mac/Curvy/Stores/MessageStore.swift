@@ -65,6 +65,7 @@ final class MessageStore {
     @ObservationIgnored private let historyPerPage = 50
 
     @ObservationIgnored private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private var wakeObserver: (any NSObjectProtocol)?
     @ObservationIgnored private var currentInvite: Invite?
     @ObservationIgnored private var roomKey: Data?
     @ObservationIgnored private(set) var consecutiveErrors: Int = 0
@@ -132,12 +133,35 @@ final class MessageStore {
                 await self?.seedInitialHistoryIfNeeded()
                 await self?.runPollLoop()
             }
+            wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.kickPoll() }
+            }
+        }
+    }
+
+    /// Interrupt any in-progress sleep, reset error backoff, and restart
+    /// the poll loop immediately. Called on system wake and scene activation
+    /// so the app catches up without waiting for a potentially long backoff.
+    func kickPoll() {
+        guard currentInvite != nil, roomKey != nil else { return }
+        consecutiveErrors = 0
+        pollTask?.cancel()
+        pollTask = Task { [weak self] in
+            await self?.runPollLoop()
         }
     }
 
     /// Cancel the polling loop and clear in-memory secrets. Safe to
     /// call when not started.
     func stop() {
+        if let obs = wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(obs)
+            wakeObserver = nil
+        }
         pollTask?.cancel()
         pollTask = nil
         currentInvite = nil

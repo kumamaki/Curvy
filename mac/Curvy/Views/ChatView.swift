@@ -129,6 +129,7 @@ struct ChatView: View {
             .onChange(of: scenePhase) { _, new in
                 if new == .active {
                     store.markRead()
+                    store.kickPoll()
                     // Re-snap to the latest only if the user was at
                     // the bottom when they left. id-based scrollTo
                     // (not edge:) so LazyVStack materializes the

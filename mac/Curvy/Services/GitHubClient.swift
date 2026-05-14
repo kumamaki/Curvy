@@ -431,7 +431,6 @@ struct GitHubClient: Sendable {
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 15
-        config.waitsForConnectivity = true
         return URLSession(configuration: config)
     }()
 
