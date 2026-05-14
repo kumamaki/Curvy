@@ -91,7 +91,7 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
-git fetch --tags --quiet "$REMOTE"
+git fetch "$REMOTE" main --tags --quiet
 
 REMOTE_HEAD="$(git rev-parse "$REMOTE/main" 2>/dev/null || echo "")"
 if [[ -z "$REMOTE_HEAD" ]]; then
