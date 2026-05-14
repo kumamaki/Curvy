@@ -307,23 +307,20 @@ struct MessageRow: View {
 
                 messageBody
                     .overlay {
-                        // Reply-chip-jump highlight. Bubble-shaped
-                        // brand-orange stroke that fades in/out around
-                        // the row that was navigated to. The animation
-                        // value swap on `isHighlighted` is what makes
-                        // the appearance/disappearance feel alive
-                        // rather than instant.
-                        if isHighlighted {
-                            bubbleShape
-                                .strokeBorder(
-                                    Color.curvyBrand,
-                                    style: StrokeStyle(lineWidth: 2)
-                                )
-                                .transition(.opacity)
-                        }
+                        // Reply-chip-jump highlight. A semi-transparent
+                        // tint fill — same pattern as Telegram/WhatsApp.
+                        // Fades in fast (0.15s) so it registers, fades
+                        // out slow (0.45s) so it doesn't feel abrupt.
+                        // clearHighlightAfterDelay() drives the lifecycle
+                        // by flipping isHighlighted → false after ~1s,
+                        // which triggers the fade-out animation.
+                        bubbleShape
+                            .fill(Color.accentColor.opacity(isHighlighted ? 0.22 : 0))
                     }
                     .animation(
-                        reduceMotion ? .linear(duration: 0) : .easeInOut(duration: 0.28),
+                        reduceMotion ? .linear(duration: 0)
+                            : isHighlighted ? .easeOut(duration: 0.15)
+                                           : .easeIn(duration: 0.45),
                         value: isHighlighted
                     )
 
