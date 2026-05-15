@@ -85,15 +85,13 @@ final class BlobFetcher {
 
         let cacheURL = Self.cacheURL(for: assetPath)
         if FileManager.default.fileExists(atPath: cacheURL.path) {
-            // Cache hit, but `imageCachedAt` may be nil if the file
-            // landed in a previous run before we recorded it.
+            // Cache hit, but `imageCachedAt` may be nil if the file landed in a
+            // previous run before we recorded it. Mark it now — no explicit save
+            // here because the caller (decryptAndIngest) saves at end of its loop,
+            // and calling save() per-image inside that loop was costing one
+            // CoreData transaction per poll cycle per image (~20–50ms each).
             if message.imageCachedAt == nil {
                 message.imageCachedAt = Date()
-                do {
-                    try modelContext.save()
-                } catch {
-                    logger.error("imageCachedAt save failed for <\(assetPath, privacy: .public)>: \(error.localizedDescription, privacy: .public)")
-                }
             }
             return
         }

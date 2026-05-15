@@ -552,7 +552,7 @@ final class MessageStore {
             let comments = try await github.listComments(invite: invite, since: since)
             await decryptAndIngest(comments, invite: invite, key: key)
             consecutiveErrors = 0
-            status = .polling
+            if status != .polling { status = .polling }
         } catch {
             consecutiveErrors += 1
             status = .error("\(error)")
@@ -782,6 +782,9 @@ final class MessageStore {
         let id = comment.id
         let descriptor = FetchDescriptor<CachedMessage>(predicate: #Predicate { $0.id == id })
         if let existing = (try? modelContext.fetch(descriptor))?.first {
+            // Skip if unchanged — re-setting the same values fires 7 willSet
+            // notifications per poll for zero benefit.
+            guard existing.updatedAt != comment.updatedAt else { return }
             existing.kind = .text
             existing.sender = text.sender
             existing.body = text.body
@@ -816,6 +819,15 @@ final class MessageStore {
 
         let row: CachedMessage
         if let existing = (try? modelContext.fetch(descriptor))?.first {
+            // If the comment hasn't changed on GitHub, skip re-setting all 13
+            // properties — each fires a willSet that queues a SwiftUI graph
+            // invalidation. With the `since` boundary re-delivering the same
+            // images on every poll, this was generating 13×N graph mutations
+            // per poll cycle for no change in data.
+            if existing.updatedAt == comment.updatedAt {
+                blobFetcher.materialize(existing, invite: invite, roomKey: key)
+                return
+            }
             existing.kind = .image
             existing.sender = image.sender
             existing.body = image.caption ?? ""
