@@ -607,6 +607,14 @@ struct ChatView: View {
                 AppLog.ui.pub("[scroll] animated → \(lastID)")
                 withAnimation(SendAnimation.scroll) {
                     proxy.scrollTo(lastID, anchor: .bottom)
+                } completion: {
+                    // Corrective pass: when a date separator is inserted
+                    // alongside the new row, its height isn't in geometry
+                    // when the spring's target is resolved, so the row
+                    // lands short of the viewport bottom. Snap flush after
+                    // layout settles. No-op when there's no separator.
+                    var t = Transaction(); t.disablesAnimations = true
+                    withTransaction(t) { proxy.scrollTo(lastID, anchor: .bottom) }
                 }
             }
             isPinnedToBottom = true
