@@ -988,19 +988,44 @@ private struct JumpToLatestPill: View {
     let count: Int
     let action: () -> Void
 
+    @State private var hovering = false
+
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.down")
-                    .font(.caption2.weight(.semibold))
-                Text(count == 1 ? "1 new" : "\(count) new")
-                    .font(.caption.weight(.medium))
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(Color.curvyBrand.opacity(0.18))
+                    Image(systemName: "chevron.down")
+                        .font(.footnote.weight(.bold))
+                        .foregroundStyle(Color.curvyBrand)
+                }
+                .frame(width: 22, height: 22)
+
+                HStack(spacing: 4) {
+                    Text("\(count)")
+                        .font(.subheadline.weight(.semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(.primary)
+                    Text(count == 1 ? "new message" : "new messages")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
             }
-            .padding(.horizontal, 12)
+            .padding(.leading, 8)
+            .padding(.trailing, 14)
             .padding(.vertical, 8)
+            .glassyBackground(in: .capsule)
+            .shadow(
+                color: .black.opacity(hovering ? 0.20 : 0.12),
+                radius: hovering ? 12 : 6,
+                y: hovering ? 4 : 2
+            )
+            .scaleEffect(hovering ? 1.02 : 1.0)
         }
-        .adaptiveGlassProminent()
-        .tint(.curvyBrand)
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.15), value: hovering)
     }
 }
 
