@@ -7,6 +7,15 @@
         <language>en</language>
         <!-- Entries are prepended here by scripts/update-appcast.sh on each release. -->
         <item>
+            <title>1.3.5</title>
+            <pubDate>Sat, 16 May 2026 09:26:45 +0000</pubDate>
+            <link>https://github.com/kumamaki/Curvy</link>
+            <sparkle:version>1.3.5</sparkle:version>
+            <sparkle:shortVersionString>1.3.5</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/kumamaki/Curvy/releases/download/v1.3.5/Curvy-1.3.5.dmg" length="4387135" type="application/octet-stream" sparkle:edSignature="yXYlwljI9BxqdGj99w/t5B/FlYVkVgNxr/IWCOGvgKcDek9XbIjuKprn8bBz3OysJLOiomxFTGCJP2r22TmUDA=="/>
+        </item>
+        <item>
             <title>1.3.4</title>
             <pubDate>Fri, 15 May 2026 15:25:05 +0000</pubDate>
             <link>https://github.com/kumamaki/Curvy</link>
@@ -41,15 +50,6 @@
             <sparkle:shortVersionString>1.3.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
             <enclosure url="https://github.com/kumamaki/Curvy/releases/download/v1.3.1/Curvy-1.3.1.dmg" length="4355728" type="application/octet-stream" sparkle:edSignature="VL5Bc+zhoEgHgIu0DHDz6mAAk9dF2vP0PZ62e085XpkAbgrQxO5l9PzupsLU+r4IFQYcYZ2je9iDwBfXXhp+BA=="/>
-        </item>
-        <item>
-            <title>1.3.0</title>
-            <pubDate>Thu, 14 May 2026 09:43:34 +0000</pubDate>
-            <link>https://github.com/kumamaki/Curvy</link>
-            <sparkle:version>1.3.0</sparkle:version>
-            <sparkle:shortVersionString>1.3.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/kumamaki/Curvy/releases/download/v1.3.0/Curvy-1.3.0.dmg" length="4399163" type="application/octet-stream" sparkle:edSignature="wzYo96/2s2DJF+UGwrgPqQVsF4mN4so8dIMk9/YDc2Cp+uuuo2+dOOSTzMgFwcZzo0haOgJbqM4DHnDctjFzCA=="/>
         </item>
         <item>
             <title>1.2.5</title>
