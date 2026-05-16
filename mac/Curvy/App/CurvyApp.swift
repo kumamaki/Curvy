@@ -40,6 +40,16 @@ struct CurvyApp: App {
             fatalError("Could not create ModelContainer for CachedMessage: \(error)")
         }
         self.modelContainer = container
+        // Autosave fires a runloop timer that calls DefaultStore.save →
+        // performAndWait on the MOC queue. After long inactivity (Mac sleep,
+        // scene backgrounded, error backoff stretched to 300s) the dirty set
+        // accumulates from BlobFetcher.materialize's unsaved `imageCachedAt`
+        // bumps, and one autosave tick eventually wedges inside
+        // DefaultSnapshot.encode → swift_dynamicCast and never returns,
+        // parking the main thread in performAndWait. We already call
+        // modelContext.save() explicitly at every meaningful boundary, so
+        // autosave is duplicative.
+        container.mainContext.autosaveEnabled = false
         self._messages = State(initialValue: MessageStore(modelContext: container.mainContext))
     }
 
