@@ -132,7 +132,7 @@ final class MessageStore {
         if beginPolling, let identity {
             identityBroadcastTask?.cancel()
             identityBroadcastTask = Task { [weak self] in
-                await self?.broadcastIdentityIfNeeded(identity)
+                await self?.broadcastIdentity(identity)
             }
         }
     }
@@ -247,15 +247,15 @@ final class MessageStore {
 
     // MARK: - Identity broadcast
 
-    /// Post an `.identity` envelope to the main room if the registry
-    /// doesn't already have us under the current display name.
-    private func broadcastIdentityIfNeeded(_ identity: UserIdentity) async {
+    /// Post an `.identity` envelope to the main room on every cold
+    /// launch. We deliberately re-announce unconditionally rather than
+    /// short-circuit on a cached self-entry: history seed only fetches
+    /// the last 50 main-room comments, so a peer who joins (or
+    /// re-onboards) after our original announce scrolled off page 1
+    /// would otherwise never see us. Cost is one extra ciphertext
+    /// comment per launch per client — cheap.
+    private func broadcastIdentity(_ identity: UserIdentity) async {
         guard let room = pollers[ConversationID.room] else { return }
-        if let known = identityRegistry.lookup(userID: identity.userID),
-           known.displayName == preferences.displayName,
-           known.pubKey == identity.pubKey {
-            return
-        }
         let announce = IdentityAnnounce(
             userID: identity.userID,
             displayName: preferences.displayName,
