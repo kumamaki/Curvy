@@ -275,13 +275,11 @@ struct ChatView: View {
                 }
             } ?? MentionResolver.resolve(in: msg.body, against: senders)
             // Show a date separator before the first message and whenever
-            // the calendar day changes or the gap between messages exceeds
-            // one hour — same heuristic as iMessage.
+            // the calendar day changes.
             let separatorDate: Date?
             if let prev {
                 let sameDay = Calendar.current.isDate(msg.sentAt, inSameDayAs: prev.sentAt)
-                let gap = msg.sentAt.timeIntervalSince(prev.sentAt)
-                separatorDate = (!sameDay || gap > 3600) ? msg.sentAt : nil
+                separatorDate = sameDay ? nil : msg.sentAt
             } else {
                 separatorDate = msg.sentAt
             }
@@ -1037,9 +1035,8 @@ private struct JumpToLatestPill: View {
     }
 }
 
-/// Centered time-context separator between message groups that are
-/// on different calendar days or more than an hour apart. Matches
-/// iMessage's floating date pill pattern.
+/// Centered date pill shown between message groups that fall on
+/// different calendar days. Matches iMessage's floating date pill.
 private struct DateSeparatorView: View {
     let date: Date
 

@@ -194,10 +194,12 @@ struct MessageRow: View {
 
     // MARK: - Subviews
 
-    private var timestampText: some View {
+    /// Telegram-style time stamp rendered inside the bubble at the
+    /// trailing edge. Always visible, dimmed against the bubble fill.
+    private var timestampInline: some View {
         Text(message.sentAt, format: .dateTime.hour().minute())
             .font(.system(size: 10, weight: .medium))
-            .foregroundStyle(.tertiary)
+            .foregroundStyle(isMine ? Color.white.opacity(0.7) : Color.secondary)
             .monospacedDigit()
             .accessibilityLabel("Sent at \(message.sentAt.formatted(date: .omitted, time: .shortened))")
     }
@@ -298,9 +300,6 @@ struct MessageRow: View {
 
             HStack(spacing: 6) {
                 if isMine {
-                    timestampText
-                        .opacity(isHovered && isLastInGroup ? 1 : 0)
-                        .animation(reduceMotion ? .linear(duration: 0) : .easeInOut(duration: 0.15), value: isHovered)
                     reactButton
                     replyButton
                 }
@@ -327,9 +326,6 @@ struct MessageRow: View {
                 if !isMine {
                     replyButton
                     reactButton
-                    timestampText
-                        .opacity(isHovered && isLastInGroup ? 1 : 0)
-                        .animation(reduceMotion ? .linear(duration: 0) : .easeInOut(duration: 0.15), value: isHovered)
                 }
             }
         }
@@ -377,10 +373,12 @@ struct MessageRow: View {
                         }
                     )
                 }
+
+                timestampInline
             }
             .padding(.horizontal, 12)
             .padding(.top, replyTarget != nil ? 50 : 9)
-            .padding(.bottom, 9)
+            .padding(.bottom, 7)
             .frame(
                 minWidth: replyTarget != nil ? 150 : nil,
                 alignment: isMine ? .trailing : .leading
