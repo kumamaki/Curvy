@@ -24,7 +24,7 @@ struct ChatView: View {
     /// `Navigation.activeConversationID`.
     let poller: ConversationPoller
     /// Optional human label for the conversation (peer's display name
-    /// for DMs, "Curvy" for the main room). Used for the title bar.
+    /// for DMs, "Curviez" for the main room). Used for the title bar.
     let title: String
 
     init(poller: ConversationPoller, title: String) {
@@ -134,7 +134,7 @@ struct ChatView: View {
                 reduceMotion ? .linear(duration: 0) : .smooth(duration: 0.18),
                 value: isDropTargeted
             )
-            .navigationTitle("Curvy")
+            .navigationTitle(title)
             .navigationSubtitle(statusSubtitle)
             .task {
                 poller.markRead()

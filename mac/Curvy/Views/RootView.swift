@@ -119,7 +119,7 @@ private struct ReadyView: View {
     }
 
     private func title(for conversationID: String) -> String {
-        if conversationID == ConversationID.room { return "Curvy" }
+        if conversationID == ConversationID.room { return "Curviez" }
         guard let peerID = store.peerUserID(for: conversationID),
               let peer = identityRegistry.lookup(userID: peerID)
         else { return "DM" }
