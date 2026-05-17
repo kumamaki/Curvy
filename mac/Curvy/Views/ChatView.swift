@@ -18,7 +18,24 @@ struct ChatView: View {
     @Environment(UpdateMonitor.self) private var updateMonitor
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
-    @Query(sort: \CachedMessage.createdAt) private var messages: [CachedMessage]
+    @Query private var messages: [CachedMessage]
+    /// Per-conversation poller for the room (or DM) this view is
+    /// showing. Wired by the parent `RootView` from the active
+    /// `Navigation.activeConversationID`.
+    let poller: ConversationPoller
+    /// Optional human label for the conversation (peer's display name
+    /// for DMs, "Curvy" for the main room). Used for the title bar.
+    let title: String
+
+    init(poller: ConversationPoller, title: String) {
+        self.poller = poller
+        self.title = title
+        let convID = poller.conversationID
+        _messages = Query(
+            filter: #Predicate<CachedMessage> { $0.conversationID == convID },
+            sort: [SortDescriptor(\CachedMessage.createdAt)]
+        )
+    }
 
     @State private var draftText: String = ""
     @State private var imageDraft: ImagePipeline.Prepared?
@@ -120,7 +137,7 @@ struct ChatView: View {
             .navigationTitle("Curvy")
             .navigationSubtitle(statusSubtitle)
             .task {
-                store.markRead()
+                poller.markRead()
             }
             // Window regaining focus is the canonical "user is reading
             // again" signal. Bumps the watermark, clears the badge,
@@ -128,8 +145,8 @@ struct ChatView: View {
             // Center.
             .onChange(of: scenePhase) { _, new in
                 if new == .active {
-                    store.markRead()
-                    store.kickPoll()
+                    poller.markRead()
+                    poller.kickPoll()
                     // Re-snap to the latest only if the user was at
                     // the bottom when they left. id-based scrollTo
                     // (not edge:) so LazyVStack materializes the
@@ -187,7 +204,7 @@ struct ChatView: View {
     /// coloured Live / Offline text — green when the polling loop
     /// is healthy, orange when it's hit an error and is backing off.
     private var statusSubtitle: Text {
-        if case .error = store.status {
+        if case .error = poller.status {
             return Text("Offline").foregroundStyle(.orange)
         }
         return Text("Live").foregroundStyle(.green)
@@ -367,9 +384,9 @@ struct ChatView: View {
         Task {
             do {
                 if alreadyMine {
-                    try await store.removeReaction(targetID: targetID, emoji: emoji)
+                    try await poller.removeReaction(targetID: targetID, emoji: emoji)
                 } else {
-                    try await store.sendReaction(targetID: targetID, emoji: emoji)
+                    try await poller.sendReaction(targetID: targetID, emoji: emoji)
                 }
             } catch {
                 shakeTrigger += 1
@@ -412,7 +429,7 @@ struct ChatView: View {
         ScrollViewReader { proxy in
         ScrollView {
             VStack(spacing: 0) {
-                if store.isLoadingOlderMessages {
+                if poller.isLoadingOlderMessages {
                     ProgressView()
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 16)
@@ -645,12 +662,12 @@ struct ChatView: View {
         // previous load is still in flight (restore clears it post-prepend).
         if didSeed,
            snap.nearTop,
-           store.hasOlderMessages,
-           !store.isLoadingOlderMessages,
+           poller.hasOlderMessages,
+           !poller.isLoadingOlderMessages,
            needsScrollRestoreID == nil,
            let anchorID = cachedRows.first?.id {
             needsScrollRestoreID = anchorID
-            Task { await store.loadOlderMessages() }
+            Task { await poller.loadOlderMessages() }
         }
     }
 
@@ -727,7 +744,7 @@ struct ChatView: View {
         let syncInserted: CachedMessage?
         if attachedImage == nil {
             do {
-                syncInserted = try store.insertPendingText(text: textToSend, replyTo: replyID)
+                syncInserted = try poller.insertPendingText(text: textToSend, replyTo: replyID)
                 AppLog.ui.pub("[send] sync-insert ok pending.id=\(syncInserted?.id ?? 0)")
             } catch {
                 AppLog.ui.pub("[send] sync-insert failed: \(error.localizedDescription)")
@@ -743,13 +760,13 @@ struct ChatView: View {
         Task {
             do {
                 if let attachedImage {
-                    try await store.sendImage(
+                    try await poller.sendImage(
                         prepared: attachedImage,
                         caption: captionToSend,
                         replyTo: replyID
                     )
                 } else if let syncInserted {
-                    try await store.uploadPendingText(
+                    try await poller.uploadPendingText(
                         syncInserted,
                         text: textToSend,
                         replyTo: replyID

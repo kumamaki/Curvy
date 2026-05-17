@@ -7,6 +7,7 @@ import UserNotifications
 struct CurvyApp: App {
     @State private var session = SessionStore()
     @State private var messages: MessageStore
+    @State private var identityRegistry: IdentityRegistry
     @State private var notificationDelegate = NotificationDelegate()
     private let modelContainer: ModelContainer
     // Must be a stored `@State` — Sparkle stops the updater if this is released.
@@ -32,12 +33,12 @@ struct CurvyApp: App {
         let container: ModelContainer
         do {
             container = try ModelContainer(
-                for: Schema([CachedMessage.self]),
+                for: Schema([CachedMessage.self, CachedIdentity.self, CachedConversation.self]),
                 migrationPlan: CachedMessageMigrationPlan.self,
                 configurations: [modelConfig]
             )
         } catch {
-            fatalError("Could not create ModelContainer for CachedMessage: \(error)")
+            fatalError("Could not create ModelContainer for Curvy schema: \(error)")
         }
         self.modelContainer = container
         // Autosave fires a runloop timer that calls DefaultStore.save →
@@ -50,7 +51,12 @@ struct CurvyApp: App {
         // modelContext.save() explicitly at every meaningful boundary, so
         // autosave is duplicative.
         container.mainContext.autosaveEnabled = false
-        self._messages = State(initialValue: MessageStore(modelContext: container.mainContext))
+        let registry = IdentityRegistry(modelContext: container.mainContext)
+        self._identityRegistry = State(initialValue: registry)
+        self._messages = State(initialValue: MessageStore(
+            modelContext: container.mainContext,
+            identityRegistry: registry
+        ))
     }
 
     var body: some Scene {
@@ -58,6 +64,7 @@ struct CurvyApp: App {
             RootView()
                 .environment(session)
                 .environment(messages)
+                .environment(identityRegistry)
                 .environment(updateMonitor)
                 .modelContainer(modelContainer)
                 .tint(Color.curvyBrand)
@@ -77,7 +84,12 @@ struct CurvyApp: App {
                     // Keying on the PAT is enough — friend rotations
                     // produce a new PAT, sign-out nils it out.
                     if let invite = session.currentInvite {
-                        messages.start(invite: invite)
+                        let identity = session.identity(displayName: messages.displayName)
+                        messages.start(
+                            invite: invite,
+                            identity: identity,
+                            privateKey: session.myPrivateKey
+                        )
                     } else {
                         messages.stop()
                     }

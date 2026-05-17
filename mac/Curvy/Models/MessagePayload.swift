@@ -11,12 +11,18 @@ enum MessagePayload: Codable, Sendable, Equatable {
     case image(ImageMessage)
     case reaction(ReactionMessage)
     case reactionRemove(ReactionRemoveMessage)
+    /// v1.5 — identity announcement broadcast to the main room so the
+    /// other clients learn this device's stable userID + display name +
+    /// X25519 public key. Has no `sender` (the identity *is* the
+    /// sender), so the `sender` projection below treats it specially.
+    case identity(IdentityAnnounce)
 
     enum Kind: String, Codable, Sendable {
         case text
         case image
         case reaction
         case reactionRemove = "reaction_remove"
+        case identity
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -35,6 +41,8 @@ enum MessagePayload: Codable, Sendable, Equatable {
             self = .reaction(try ReactionMessage(from: decoder))
         case .reactionRemove:
             self = .reactionRemove(try ReactionRemoveMessage(from: decoder))
+        case .identity:
+            self = .identity(try IdentityAnnounce(from: decoder))
         }
     }
 
@@ -53,19 +61,24 @@ enum MessagePayload: Codable, Sendable, Equatable {
         case .reactionRemove(let message):
             try container.encode(Kind.reactionRemove, forKey: .type)
             try message.encode(to: encoder)
+        case .identity(let message):
+            try container.encode(Kind.identity, forKey: .type)
+            try message.encode(to: encoder)
         }
     }
 
-    /// The display name of whoever produced this payload, regardless
-    /// of kind. Every concrete message type carries `sender` (it's the
-    /// load-bearing identity field that lives inside the ciphertext),
-    /// so this lookup is total — no optionals, no fallbacks.
+    /// The display name of whoever produced this payload, when there
+    /// is one. Identity announcements carry their own `displayName`
+    /// rather than a separate `sender`, so we project that through;
+    /// all other kinds have a `sender` field as the load-bearing
+    /// identity inside the ciphertext.
     var sender: String {
         switch self {
         case .text(let m): return m.sender
         case .image(let m): return m.sender
         case .reaction(let m): return m.sender
         case .reactionRemove(let m): return m.sender
+        case .identity(let m): return m.displayName
         }
     }
 }

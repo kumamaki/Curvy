@@ -5,6 +5,14 @@ import SwiftUI
 /// reads the phase.
 struct RootView: View {
     @Environment(SessionStore.self) private var session
+    @Environment(MessageStore.self) private var store
+    @Environment(IdentityRegistry.self) private var identityRegistry
+    /// Owned here because the lifecycle matches the window. Injected
+    /// into descendants via `.environment(...)` so children read it
+    /// from the environment rather than being passed a binding from a
+    /// distant ancestor — keeps `ConversationSidebar` / `ChatView`
+    /// independent of the ownership location.
+    @State private var navigation = Navigation()
 
     var body: some View {
         ZStack {
@@ -14,25 +22,128 @@ struct RootView: View {
             case .needsInvite:
                 InviteView()
             case .ready:
-                ChatView()
+                ReadyView()
             case .error(let message):
                 ErrorView(message: message)
             }
         }
+        .environment(navigation)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(WindowBackground())
         .navigationTitle("Curvy")
-        // Always-present toolbar so every phase inherits macOS 26's
-        // unified-chrome look (rounded corners, inset traffic lights).
-        // Without a toolbar registered, the window falls back to the
-        // legacy thin titlebar — visible during bootstrap/invite as a
-        // visual jolt when switching to the chat. The placeholder is
-        // a 0-sized clear view; child phases (ChatView) still add their
-        // own toolbar items, which compose with this.
         .toolbar {
             ToolbarItem(placement: .principal) {
                 Color.clear.frame(width: 0, height: 0)
             }
+        }
+    }
+}
+
+/// `.ready` layout: NavigationSplitView with the conversation sidebar
+/// (collapsed by default) and the active chat as the detail pane.
+/// Lives in its own view so `@State` and the per-conversation
+/// `openDM` task can scope cleanly without leaking into bootstrap/
+/// invite phases that don't need them.
+private struct ReadyView: View {
+    @Environment(Navigation.self) private var navigation
+    @Environment(MessageStore.self) private var store
+    @Environment(IdentityRegistry.self) private var identityRegistry
+    @Environment(SessionStore.self) private var session
+    /// Last DM-open failure for the active conversation, surfaced as
+    /// a retry affordance in the detail pane. Cleared on every new
+    /// attempt; nil while the open is in-flight or has succeeded.
+    @State private var openError: String?
+
+    var body: some View {
+        @Bindable var nav = navigation
+        NavigationSplitView(columnVisibility: $nav.sidebarVisibility) {
+            ConversationSidebar()
+                .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
+        } detail: {
+            detail
+        }
+        .navigationSplitViewStyle(.balanced)
+        // Whenever the active conversation flips to a DM that doesn't
+        // yet have a poller, spin one up. The result mutates `store.
+        // pollers` (Observable), so the detail view re-renders once
+        // the poller exists.
+        .task(id: navigation.activeConversationID) {
+            openError = nil
+            await ensureActivePoller()
+        }
+    }
+
+    @ViewBuilder private var detail: some View {
+        if let poller = store.poller(for: navigation.activeConversationID) {
+            ChatView(poller: poller, title: title(for: navigation.activeConversationID))
+                // Force a fresh ChatView when the conversation flips —
+                // `@Query`'s predicate is captured at init time, so
+                // reusing the view instance against a new poller would
+                // silently keep showing the previous conversation's
+                // messages. Re-identifying tears it down + rebuilds.
+                .id(poller.conversationID)
+        } else if let openError {
+            openFailureView(error: openError)
+        } else {
+            VStack(spacing: 12) {
+                ProgressView()
+                Text("Opening conversation…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func openFailureView(error: String) -> some View {
+        VStack(spacing: 16) {
+            Image(systemName: "exclamationmark.bubble")
+                .font(.system(size: 36, weight: .light))
+                .foregroundStyle(.orange)
+            Text("Couldn't open this conversation")
+                .font(.title3.weight(.semibold))
+            Text(error)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 360)
+            Button("Try again") {
+                Task {
+                    openError = nil
+                    await ensureActivePoller()
+                }
+            }
+            .controlSize(.large)
+        }
+        .padding(40)
+    }
+
+    private func title(for conversationID: String) -> String {
+        if conversationID == ConversationID.room { return "Curvy" }
+        guard let peerID = store.peerUserID(for: conversationID),
+              let peer = identityRegistry.lookup(userID: peerID)
+        else { return "DM" }
+        return peer.displayName
+    }
+
+    private func ensureActivePoller() async {
+        let convID = navigation.activeConversationID
+        if convID == ConversationID.room { return }
+        if store.poller(for: convID) != nil { return }
+        guard let myUserID = session.myUserID else {
+            openError = "Identity not loaded yet — try again in a moment."
+            return
+        }
+        guard let peer = identityRegistry.roster(excluding: myUserID)
+            .first(where: { ConversationID.dm(myUserID, $0.userID) == convID })
+        else {
+            openError = "Peer's identity hasn't been received yet."
+            return
+        }
+        do {
+            _ = try await store.openDM(with: peer)
+        } catch {
+            AppLog.session.error("openDM failed: \(error.localizedDescription, privacy: .public)")
+            openError = error.localizedDescription
         }
     }
 }

@@ -16,6 +16,16 @@ struct KeychainStore: Sendable {
         /// JSON-encoded `Invite` (token + room key + repo coordinates).
         /// Single atomic blob so onboarding can't half-succeed.
         static let invite = "invite.bundle"
+        /// JSON-encoded `IdentityBundle` (per-device UUID + raw 32-byte
+        /// Curve25519 private key, base64-encoded). Per the project
+        /// trust model (see `CLAUDE.md`: "single atomic blob means
+        /// onboarding can't half-succeed"), the userID and the key
+        /// share one Keychain entry so a crash between writes can never
+        /// leave a half-provisioned identity (UUID without key, or vice
+        /// versa). Kept distinct from `invite` because identity is
+        /// per-device while invite is shareable, and we want re-onboard
+        /// (sign-out + paste new invite) to preserve identity.
+        static let identityBundle = "identity.bundle"
     }
 
     enum KeychainError: Error, CustomStringConvertible {

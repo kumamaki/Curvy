@@ -5,7 +5,9 @@ import SwiftData
 
 enum CachedMessageSchemaV1: VersionedSchema {
     static let versionIdentifier = Schema.Version(1, 0, 0)
-    static var models: [any PersistentModel.Type] { [CachedMessage.self] }
+    static var models: [any PersistentModel.Type] {
+        [CachedMessage.self, CachedIdentity.self, CachedConversation.self]
+    }
 }
 
 enum CachedMessageMigrationPlan: SchemaMigrationPlan {
@@ -50,6 +52,19 @@ enum CachedMessageMigrationPlan: SchemaMigrationPlan {
 final class CachedMessage {
     @Attribute(.unique) var id: Int
     var kindRaw: String
+    /// Which conversation this message belongs to. `"room"` for the
+    /// main 4-person room (everything pre-v1.5), `"dm:<minUUID>:
+    /// <maxUUID>"` for a per-pair DM. Default in the model declaration
+    /// is the load-bearing piece of the V1→V1.5 lightweight migration:
+    /// existing rows have no value on disk and get populated with
+    /// `"room"` on first read.
+    ///
+    /// The literal `"room"` is duplicated from `ConversationID.room`
+    /// on purpose — SwiftData reads `@Model` property defaults at
+    /// schema-load time when no `self`/no module context is available,
+    /// so referencing the `ConversationID.room` constant here fails to
+    /// resolve at migration time. Keep the two in sync by hand.
+    var conversationID: String = "room"
     var sender: String
     var body: String
     var replyTo: String?
@@ -112,6 +127,7 @@ final class CachedMessage {
 
     init(id: Int,
          kind: Kind,
+         conversationID: String = "room",
          sender: String,
          body: String,
          replyTo: String?,
@@ -130,6 +146,7 @@ final class CachedMessage {
          reactionTargetID: String? = nil) {
         self.id = id
         self.kindRaw = kind.rawValue
+        self.conversationID = conversationID
         self.sender = sender
         self.body = body
         self.replyTo = replyTo

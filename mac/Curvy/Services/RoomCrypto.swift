@@ -33,11 +33,25 @@ struct RoomCrypto: Sendable {
     /// Seal a payload into a fresh envelope. Generates a new random
     /// 12-byte nonce per call. The caller is responsible for posting
     /// `envelope.encodeForWire()` to GitHub.
+    ///
+    /// The `SymmetricKey` overload is preferred for the DM path so
+    /// `RoomCrypto.deriveDMKey`'s result never leaves the
+    /// `SymmetricKey` protected representation. The `Data` overload
+    /// stays for the main-room path because the room key arrives from
+    /// the invite as `Data` and round-tripping it through
+    /// `SymmetricKey` at the call site is noise.
     func seal(_ payload: MessagePayload, with keyData: Data) throws -> MessageEnvelope {
         guard keyData.count == 32 else {
             throw CryptoError.invalidKeyLength(keyData.count)
         }
-        let key = SymmetricKey(data: keyData)
+        return try seal(payload, with: SymmetricKey(data: keyData))
+    }
+
+    func seal(_ payload: MessagePayload, with key: SymmetricKey) throws -> MessageEnvelope {
+        let keySize = key.bitCount
+        guard keySize == 256 else {
+            throw CryptoError.invalidKeyLength(keySize / 8)
+        }
         let plaintext: Data
         do {
             plaintext = try Self.encoder.encode(payload)
@@ -61,11 +75,17 @@ struct RoomCrypto: Sendable {
         guard keyData.count == 32 else {
             throw CryptoError.invalidKeyLength(keyData.count)
         }
+        return try open(envelope, with: SymmetricKey(data: keyData))
+    }
+
+    func open(_ envelope: MessageEnvelope, with key: SymmetricKey) throws -> MessagePayload {
+        guard key.bitCount == 256 else {
+            throw CryptoError.invalidKeyLength(key.bitCount / 8)
+        }
         guard let nonceBytes = envelope.nonceData, nonceBytes.count == 12,
               let combined = envelope.ciphertextData, combined.count >= 16 else {
             throw CryptoError.malformedEnvelope
         }
-        let key = SymmetricKey(data: keyData)
         let nonce = try AES.GCM.Nonce(data: nonceBytes)
         let tag = combined.suffix(16)
         let ciphertext = combined.prefix(combined.count - 16)
@@ -83,6 +103,47 @@ struct RoomCrypto: Sendable {
             AppLog.crypto.error("payload decode failed: \(error.localizedDescription, privacy: .public)")
             throw CryptoError.payloadDecodeFailed(error)
         }
+    }
+
+    // MARK: - DM key derivation (v1.5)
+
+    /// Derive the AES-GCM key for a DM channel between two users.
+    ///
+    /// Both endpoints compute the same 32-byte key from:
+    ///   pairKey = HKDF<SHA-256>(
+    ///       ikm:  X25519(myPriv, theirPub),
+    ///       salt: "curvy-dm-v1",
+    ///       info: sorted(myUserID, theirUserID) joined by ":")
+    ///
+    /// Sorting the IDs guarantees both sides reach the same `info`
+    /// regardless of who is "me" — the pair (A, B) and (B, A) are the
+    /// same channel. The static salt scopes derivation to this app +
+    /// purpose so the same Curve25519 key could in principle be reused
+    /// for non-DM purposes without weakening either domain.
+    ///
+    /// Throws if X25519 key agreement fails (it shouldn't for well-
+    /// formed inputs). Returns raw `Data` rather than `SymmetricKey`
+    /// so the result feeds directly into `seal/open`, which already
+    /// take `keyData: Data`.
+    static func deriveDMKey(
+        myPrivateKey: Curve25519.KeyAgreement.PrivateKey,
+        theirPublicKey: Curve25519.KeyAgreement.PublicKey,
+        myUserID: UUID,
+        theirUserID: UUID
+    ) throws -> SymmetricKey {
+        let shared = try myPrivateKey.sharedSecretFromKeyAgreement(with: theirPublicKey)
+        let salt = Data("curvy-dm-v1".utf8)
+        let sortedIDs = [myUserID, theirUserID]
+            .map { $0.uuidString.lowercased() }
+            .sorted()
+            .joined(separator: ":")
+        let info = Data(sortedIDs.utf8)
+        return shared.hkdfDerivedSymmetricKey(
+            using: SHA256.self,
+            salt: salt,
+            sharedInfo: info,
+            outputByteCount: 32
+        )
     }
 
     // MARK: - Shared codecs

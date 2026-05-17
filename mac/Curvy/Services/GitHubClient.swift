@@ -80,6 +80,16 @@ struct GitHubClient: Sendable {
         let sha: String
     }
 
+    /// Minimal reference to a `curvy-room` issue — number + title.
+    /// v1.5 uses this to discover (and lazily create) per-pair DM
+    /// issues by deterministic title (`DM <minUUID>:<maxUUID>`).
+    /// We avoid decoding more fields than necessary; titles are the
+    /// only thing the discovery scan reads.
+    struct IssueRef: Decodable, Sendable, Equatable {
+        let number: Int
+        let title: String
+    }
+
     private let transport: Transport
 
     init(transport: @escaping Transport = { try await GitHubClient.session.data(for: $0) }) {
@@ -99,13 +109,17 @@ struct GitHubClient: Sendable {
         _ = try await execute(request)
     }
 
-    /// Fetch basic metadata for the room issue — specifically its
-    /// comment count, which `MessageStore` uses on first launch to
+    /// Fetch basic metadata for a `curvy-room` issue — specifically
+    /// its comment count, which `MessageStore` uses on first launch to
     /// compute which page of comment history to seed from so the newest
     /// messages appear first.
-    func issueInfo(invite: Invite) async throws -> IssueInfo {
+    ///
+    /// `issueNumber` defaults to the main-room issue from `RoomConfig`.
+    /// DM callers pass the per-pair issue number resolved via
+    /// `CachedConversation`.
+    func issueInfo(invite: Invite, issueNumber: Int = RoomConfig.issueNumber) async throws -> IssueInfo {
         let request = try authenticatedRequest(
-            path: "/repos/\(invite.owner)/\(invite.repo)/issues/\(RoomConfig.issueNumber)",
+            path: "/repos/\(invite.owner)/\(invite.repo)/issues/\(issueNumber)",
             token: invite.token
         )
         let data = try await execute(request)
@@ -123,6 +137,7 @@ struct GitHubClient: Sendable {
     /// and by `loadOlderMessages` to page backwards through history.
     func listComments(
         invite: Invite,
+        issueNumber: Int = RoomConfig.issueNumber,
         since: Date? = nil,
         page: Int = 1,
         perPage: Int = 100
@@ -138,7 +153,7 @@ struct GitHubClient: Sendable {
             query.append(URLQueryItem(name: "since", value: since.formatted(style)))
         }
         let request = try authenticatedRequest(
-            path: "/repos/\(invite.owner)/\(invite.repo)/issues/\(RoomConfig.issueNumber)/comments",
+            path: "/repos/\(invite.owner)/\(invite.repo)/issues/\(issueNumber)/comments",
             queryItems: query,
             token: invite.token
         )
@@ -150,14 +165,17 @@ struct GitHubClient: Sendable {
         }
     }
 
-    /// Post a comment to the room issue. `body` is the wire-form
+    /// Post a comment to a `curvy-room` issue. `body` is the wire-form
     /// envelope (base64 of JSON), opaque to GitHub. Returns the created
     /// `IssueComment` so callers can capture the assigned ID for local
     /// caching without a follow-up GET.
-    func postComment(invite: Invite, body: String) async throws -> IssueComment {
+    ///
+    /// `issueNumber` defaults to the main-room issue from `RoomConfig`;
+    /// DM senders pass the per-pair issue number.
+    func postComment(invite: Invite, issueNumber: Int = RoomConfig.issueNumber, body: String) async throws -> IssueComment {
         let payload = try Self.encoder.encode(["body": body])
         let request = try authenticatedRequest(
-            path: "/repos/\(invite.owner)/\(invite.repo)/issues/\(RoomConfig.issueNumber)/comments",
+            path: "/repos/\(invite.owner)/\(invite.repo)/issues/\(issueNumber)/comments",
             method: "POST",
             body: payload,
             token: invite.token
@@ -165,6 +183,61 @@ struct GitHubClient: Sendable {
         let data = try await execute(request)
         do {
             return try Self.decoder.decode(IssueComment.self, from: data)
+        } catch {
+            throw GitHubError.decoding(error)
+        }
+    }
+
+    // MARK: - DM issue discovery (v1.5)
+
+    /// List issues on `curvy-room` for DM channel discovery. We only
+    /// need `number` + `title` — `IssueRef` is shaped accordingly so
+    /// JSON decoding ignores the (much larger) rest of GitHub's issue
+    /// response. `state=all` ensures closed pair-issues still surface
+    /// (we never close them, but the safety is free).
+    ///
+    /// `perPage=100` is the API maximum. With four humans there are at
+    /// most 6 DM issues + 2 main-room issues, so a single page covers
+    /// the worst case by an order of magnitude.
+    func listIssues(invite: Invite, perPage: Int = 100) async throws -> [IssueRef] {
+        let query: [URLQueryItem] = [
+            URLQueryItem(name: "state", value: "all"),
+            URLQueryItem(name: "per_page", value: "\(perPage)"),
+        ]
+        let request = try authenticatedRequest(
+            path: "/repos/\(invite.owner)/\(invite.repo)/issues",
+            queryItems: query,
+            token: invite.token
+        )
+        let data = try await execute(request)
+        do {
+            return try Self.decoder.decode([IssueRef].self, from: data)
+        } catch {
+            throw GitHubError.decoding(error)
+        }
+    }
+
+    /// Create a new issue on `curvy-room`. Used to materialise a DM
+    /// channel the first time a pair starts talking. The `title` is
+    /// the canonical `DM <minUUID>:<maxUUID>` string both endpoints
+    /// compute deterministically; `body` is a fixed sentinel since
+    /// the actual conversation happens in comments.
+    ///
+    /// Returns the created issue's number + title. `curvy-room` is a
+    /// private repo, so only repo collaborators can see these issues —
+    /// GitHub has no per-issue ACL; visibility is inherited from the
+    /// containing repo. Issues are never closed by Curvy itself.
+    func createIssue(invite: Invite, title: String, body: String) async throws -> IssueRef {
+        let payload = try Self.encoder.encode(["title": title, "body": body])
+        let request = try authenticatedRequest(
+            path: "/repos/\(invite.owner)/\(invite.repo)/issues",
+            method: "POST",
+            body: payload,
+            token: invite.token
+        )
+        let data = try await execute(request)
+        do {
+            return try Self.decoder.decode(IssueRef.self, from: data)
         } catch {
             throw GitHubError.decoding(error)
         }
