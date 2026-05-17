@@ -199,7 +199,7 @@ struct MessageRow: View {
     private var timestampInline: some View {
         Text(message.sentAt, format: .dateTime.hour().minute())
             .font(.system(size: 10, weight: .medium))
-            .foregroundStyle(isMine ? Color.white.opacity(0.7) : Color.secondary)
+            .foregroundStyle(Color.white.opacity(0.7))
             .monospacedDigit()
             .accessibilityLabel("Sent at \(message.sentAt.formatted(date: .omitted, time: .shortened))")
     }
