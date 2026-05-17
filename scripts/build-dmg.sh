@@ -52,10 +52,6 @@ STAGING="${STAGING:-$PWD/build/dmg-staging}"
 OUT_DIR="${OUT_DIR:-$PWD/dist}"
 OUT_DMG="${OUT_DMG:-$OUT_DIR/Curvy.dmg}"
 VOLNAME="${VOLNAME:-Curvy}"
-BG="$PWD/assets/dmg/background.png"
-
-[[ -f "$BG" ]] \
-  || die "Background missing at <$BG>. Regenerate with: swift scripts/make-dmg-background.swift assets/dmg"
 
 # xcbeautify is optional; falls back to raw output. VERBOSE=1 forces raw.
 if [[ -z "${VERBOSE:-}" ]] && command -v xcbeautify >/dev/null; then
@@ -104,15 +100,14 @@ mkdir -p "$(dirname "$OUT_DMG")"
 rm -f "$OUT_DMG"
 
 # --- Create DMG --------------------------------------------------------------
-# White window. Curvy.app (left) + /Applications drop target (right), pair-centered.
+# Curvy.app (left) + /Applications drop target (right), pair-centered.
 # 128pt icons with an 80pt gap → 336pt total → 102pt side margins → centers at
 # x=170 / x=370. y=180 biases the icon up to optically center the icon+label
-# unit. The background ships @1x + @2x; Finder picks the Retina copy.
+# unit.
 step "Creating installer DMG"
 dmg_start=$SECONDS
 create-dmg \
   --volname "$VOLNAME" \
-  --background "$BG" \
   --window-pos 200 120 \
   --window-size 540 380 \
   --icon-size 128 \
