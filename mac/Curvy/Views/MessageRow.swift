@@ -354,45 +354,47 @@ struct MessageRow: View {
             // of breathing room before the message text starts. The
             // 140pt minWidth keeps the band wide enough to fit the
             // sender label when the message is just one or two words.
-            VStack(alignment: isMine ? .trailing : .leading, spacing: 5) {
-                PilledBody(text: message.body,
-                          mentions: mentionResolutions,
-                          myName: mySender)
-                    .font(.system(size: 13))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .foregroundStyle(Color.white)
+            BubbleClamp(maxWidth: 400) {
+                VStack(alignment: isMine ? .trailing : .leading, spacing: 5) {
+                    PilledBody(text: message.body,
+                              mentions: mentionResolutions,
+                              myName: mySender)
+                        .font(.system(size: 13))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .foregroundStyle(Color.white)
 
-                if !reactions.groups.isEmpty {
-                    ReactionBadgeStack(
-                        reactions: reactions,
-                        mySender: mySender,
-                        namespace: reactionNamespace,
-                        isMine: isMine,
-                        onToggle: { emoji in
-                            onToggleReaction(emoji, isReactionMine(emoji))
-                        }
-                    )
-                }
+                    if !reactions.groups.isEmpty {
+                        ReactionBadgeStack(
+                            reactions: reactions,
+                            mySender: mySender,
+                            namespace: reactionNamespace,
+                            isMine: isMine,
+                            onToggle: { emoji in
+                                onToggleReaction(emoji, isReactionMine(emoji))
+                            }
+                        )
+                    }
 
-                timestampInline
-            }
-            .padding(.horizontal, 12)
-            .padding(.top, replyTarget != nil ? 50 : 9)
-            .padding(.bottom, 7)
-            .frame(
-                minWidth: replyTarget != nil ? 150 : nil,
-                alignment: isMine ? .trailing : .leading
-            )
-            .background { bubbleBackground }
-            .overlay(alignment: .topLeading) {
-                if let target = replyTarget {
-                    inlineReplyHeader(target)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .onTapGesture { onJumpToReplyParent(target) }
+                    timestampInline
                 }
+                .padding(.horizontal, 12)
+                .padding(.top, replyTarget != nil ? 50 : 9)
+                .padding(.bottom, 7)
+                .frame(
+                    minWidth: replyTarget != nil ? 150 : nil,
+                    alignment: isMine ? .trailing : .leading
+                )
+                .background { bubbleBackground }
+                .overlay(alignment: .topLeading) {
+                    if let target = replyTarget {
+                        inlineReplyHeader(target)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .onTapGesture { onJumpToReplyParent(target) }
+                    }
+                }
+                .clipShape(bubbleShape)
             }
-            .clipShape(bubbleShape)
             // clipShape sets the hit-test boundary to the clip shape,
             // causing UnevenRoundedRectangle.path to be computed on
             // every scroll hit-test for every visible bubble. Override
@@ -1115,4 +1117,30 @@ private struct PillFlowLayout: Layout {
     }
 }
 
+/// Single-subview layout that proposes `min(parentProposal, maxWidth)`
+/// to its child, then reports the child's *actual* fitted size. This
+/// gives bubbles a hug-up-to-max behavior: short text stays narrow,
+/// long text wraps at the cap. A plain `.frame(maxWidth:)` modifier is
+/// greedy (always expands to the cap), and the `.fixedSize(horizontal:)`
+/// workaround measures at unbounded width — so multi-line height comes
+/// back wrong. Proposing the clamped width during measurement is the
+/// only way `Text` reports correct wrapped height.
+private struct BubbleClamp: Layout {
+    let maxWidth: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let sub = subviews.first else { return .zero }
+        let cap = min(proposal.width ?? .infinity, maxWidth)
+        return sub.sizeThatFits(ProposedViewSize(width: cap, height: proposal.height))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard let sub = subviews.first else { return }
+        sub.place(
+            at: bounds.origin,
+            anchor: .topLeading,
+            proposal: ProposedViewSize(width: bounds.width, height: bounds.height)
+        )
+    }
+}
 
