@@ -21,13 +21,24 @@ test:
 
 # Build, kill any running instance, and launch fresh.
 run: build kill
-    open "$(ls -dt ~/Library/Developer/Xcode/DerivedData/Curvy-*/Build/Products/Debug/Curvy.app | head -1)"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    app="$(ls -dt ~/Library/Developer/Xcode/DerivedData/Curvy-*/Build/Products/Debug/Curvy.app | head -1)"
+    # Re-register with LaunchServices so lsd's view of the bundle matches the
+    # freshly-built one. Avoids -600 procNotFound when lsd's prior registration
+    # is still mid-tear-down (kernel reaped the PID, but lsd's bookkeeping is async).
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app"
+    # -n forces a brand-new instance, sidestepping LS dedup against any stale entry.
+    open -n "$app"
 
 [private]
 kill:
     #!/usr/bin/env bash
     pkill -f Curvy.app 2>/dev/null || true
     while pgrep -f Curvy.app > /dev/null 2>&1; do sleep 0.1; done
+    # pgrep tracks the kernel; launchservicesd's view is async. Wait for lsd to
+    # forget the bundle too, otherwise `open` can race and return -600.
+    while lsappinfo list 2>/dev/null | grep -q 'dev\.kumamaki\.Curvy'; do sleep 0.1; done
 
 # Trash all DerivedData copies (per CLAUDE.md: trash, never rm).
 clean: kill
