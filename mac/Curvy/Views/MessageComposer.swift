@@ -184,9 +184,9 @@ struct MessageComposer: View {
         .frame(height: draftHeight)
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
-        .background(.fill.tertiary, in: .rect(cornerRadius: 18))
+        .background(.fill.tertiary, in: .rect(cornerRadius: CurvyRadius.input))
         .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            RoundedRectangle(cornerRadius: CurvyRadius.input, style: .continuous)
                 .strokeBorder(.separator.opacity(0.4), lineWidth: 0.5)
         }
         .overlay(alignment: .topLeading) {
@@ -391,7 +391,7 @@ struct MessageComposer: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(.fill.quaternary, in: .rect(cornerRadius: 10))
+        .background(.fill.quaternary, in: .rect(cornerRadius: CurvyRadius.chip))
     }
 
     private func replyBanner(_ target: CachedMessage) -> some View {
@@ -422,7 +422,7 @@ struct MessageComposer: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(.fill.quaternary, in: .rect(cornerRadius: 10))
+        .background(.fill.quaternary, in: .rect(cornerRadius: CurvyRadius.chip))
     }
 
     // MARK: - Image input handlers

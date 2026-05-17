@@ -173,7 +173,7 @@ struct ChatView: View {
             }
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            RoundedRectangle(cornerRadius: CurvyRadius.input, style: .continuous)
                 .strokeBorder(.secondary, style: StrokeStyle(lineWidth: 2.5, dash: [10, 6]))
                 .padding(14)
         }

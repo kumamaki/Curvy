@@ -83,8 +83,8 @@ struct MessageRow: View {
     /// drives a wrapping withAnimation on the cachedRows mutation.
     @State private var entranceSettled: Bool = false
 
-    private let bubbleCorner: CGFloat = 16
-    private let bubbleTailCorner: CGFloat = 4
+    private let bubbleCorner: CGFloat = CurvyRadius.bubble
+    private let bubbleTailCorner: CGFloat = CurvyRadius.bubbleTail
 
     private var mineByEmoji: Set<String> {
         Set(reactions.groups.compactMap { $0.senders.contains(mySender) ? $0.emoji : nil })

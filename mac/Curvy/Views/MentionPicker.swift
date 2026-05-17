@@ -27,10 +27,10 @@ struct MentionPicker: View {
         }
         .padding(5)
         .frame(minWidth: 220, alignment: .leading)
-        .background(.regularMaterial, in: .rect(cornerRadius: 12, style: .continuous))
+        .background(.regularMaterial, in: .rect(cornerRadius: CurvyRadius.card, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(.separator.opacity(0.35), lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: CurvyRadius.card, style: .continuous)
+                .strokeBorder(.separator.opacity(0.4), lineWidth: 0.5)
         )
         .shadow(color: .black.opacity(0.22), radius: 14, x: 0, y: 6)
     }
