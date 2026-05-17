@@ -28,9 +28,9 @@ struct ConversationSidebar: View {
             Section {
                 row(
                     conversationID: ConversationID.room,
-                    title: "Room",
-                    subtitle: "Everyone",
-                    systemImage: "person.3.fill",
+                    title: "Curviez",
+                    subtitle: nil,
+                    systemImage: "bubble.left.and.bubble.right.fill",
                     unread: store.poller(for: ConversationID.room)?.unreadCount ?? 0
                 )
                 .tag(ConversationID.room)
