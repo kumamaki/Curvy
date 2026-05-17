@@ -150,7 +150,7 @@ final class BlobFetcher {
             let descriptor = FetchDescriptor<CachedMessage>(predicate: #Predicate { $0.id == messageID })
             if let row = (try? modelContext.fetch(descriptor))?.first {
                 row.imageCachedAt = Date()
-                try modelContext.save()
+                modelContext.savePub("BlobFetcher-materialize")
             }
         } catch {
             logger.warning("materialize failed for <\(assetPath, privacy: .public)>: \(error.localizedDescription, privacy: .public)")

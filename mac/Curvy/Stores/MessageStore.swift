@@ -283,7 +283,7 @@ final class MessageStore {
             updatedAt: now
         )
         modelContext.insert(pendingRow)
-        try? modelContext.save()
+        modelContext.savePub("insertPendingText")
         return pendingRow
     }
 
@@ -313,7 +313,7 @@ final class MessageStore {
             commitPending(pendingRow, withRealComment: comment)
         } catch {
             modelContext.delete(pendingRow)
-            try? modelContext.save()
+            modelContext.savePub("uploadPendingText-failed")
             throw error
         }
     }
@@ -342,7 +342,7 @@ final class MessageStore {
             pendingRow.createdAt = comment.createdAt
             pendingRow.updatedAt = comment.updatedAt
         }
-        try? modelContext.save()
+        modelContext.savePub("commitPendingText")
     }
 
     // MARK: - Send (image — v3)
@@ -429,7 +429,7 @@ final class MessageStore {
             imageCachedAt: Date() // local sidecar lives at pendingCacheURL
         )
         modelContext.insert(pendingRow)
-        try? modelContext.save()
+        modelContext.savePub("insertPendingImage")
 
         var assetSha: String?
         do {
@@ -493,7 +493,7 @@ final class MessageStore {
         } catch {
             logger.error("sendImage failed at <\(assetPath, privacy: .public)>: \(String(describing: error), privacy: .public)")
             modelContext.delete(pendingRow)
-            try? modelContext.save()
+            modelContext.savePub("sendImage-failed")
             try? FileManager.default.removeItem(at: pendingCacheURL)
             throw error
         }
@@ -538,7 +538,7 @@ final class MessageStore {
             pendingRow.updatedAt = comment.updatedAt
             pendingRow.imageCachedAt = Date()
         }
-        try? modelContext.save()
+        modelContext.savePub("commitPendingImage")
     }
 
     // MARK: - Polling
@@ -651,7 +651,7 @@ final class MessageStore {
             logger.warning("dropped comment <\(comment.id, privacy: .public)>: decryption failed")
             upsertWeird(comment: comment, error: DecryptError.failed)
         }
-        try? modelContext.save()
+        modelContext.savePub("decryptAndIngest")
     }
 
     private enum DecryptError: Error {
@@ -935,7 +935,7 @@ final class MessageStore {
             reactionTargetID: targetID
         )
         modelContext.insert(pendingRow)
-        try? modelContext.save()
+        modelContext.savePub("insertPendingReaction")
 
         do {
             let envelope = try crypto.seal(payload, with: key)
@@ -944,7 +944,7 @@ final class MessageStore {
             commitPendingReaction(pendingRow, withRealComment: comment)
         } catch {
             modelContext.delete(pendingRow)
-            try? modelContext.save()
+            modelContext.savePub("sendReaction-failed")
             throw error
         }
     }
@@ -979,7 +979,7 @@ final class MessageStore {
             reactionTargetID: targetID
         )
         modelContext.insert(pendingRow)
-        try? modelContext.save()
+        modelContext.savePub("insertPendingReactionRemove")
 
         do {
             let envelope = try crypto.seal(payload, with: key)
@@ -988,7 +988,7 @@ final class MessageStore {
             commitPendingReaction(pendingRow, withRealComment: comment)
         } catch {
             modelContext.delete(pendingRow)
-            try? modelContext.save()
+            modelContext.savePub("removeReaction-failed")
             throw error
         }
     }
@@ -1012,7 +1012,7 @@ final class MessageStore {
             pendingRow.createdAt = comment.createdAt
             pendingRow.updatedAt = comment.updatedAt
         }
-        try? modelContext.save()
+        modelContext.savePub("commitPendingReaction")
     }
 
     private func upsertReaction(
