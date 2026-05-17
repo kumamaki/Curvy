@@ -61,6 +61,7 @@ private struct ReadyView: View {
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
         } detail: {
             detail
+                .frame(minWidth: 480, minHeight: 600)
         }
         .navigationSplitViewStyle(.balanced)
         // Whenever the active conversation flips to a DM that doesn't
